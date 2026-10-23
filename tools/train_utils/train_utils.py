@@ -151,8 +151,10 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 start_epoch, total_epochs, start_iter, rank, tb_log, ckpt_save_dir, train_sampler=None,
                 lr_warmup_scheduler=None, ckpt_save_interval=1, max_ckpt_save_num=50,
                 merge_all_iters_to_one_epoch=False, use_amp=False,
-                use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, cfg=None):
+                use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, cfg=None,
+                eval_func=None):
     accumulated_iter = start_iter
+    eval_interval = optim_cfg.get('EVAL_INTERVAL', 0)
 
     # use for disable data augmentation hook
     hook_config = cfg.get('HOOK', None) 
@@ -209,6 +211,16 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 save_checkpoint(
                     checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=ckpt_name,
                 )
+
+            # evaluate every EVAL_INTERVAL epochs and always after the last epoch
+            if eval_func is not None and eval_interval > 0 and \
+                    (trained_epoch % eval_interval == 0 or trained_epoch == total_epochs):
+                tb_dict = eval_func(trained_epoch)
+                model.train()
+                torch.cuda.empty_cache()
+                if rank == 0 and tb_log is not None:
+                    for key, val in tb_dict.items():
+                        tb_log.add_scalar('eval/' + key, val, trained_epoch)
 
 
 def model_state_to_cpu(model_state):

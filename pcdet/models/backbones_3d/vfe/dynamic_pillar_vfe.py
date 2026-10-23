@@ -5,8 +5,8 @@ import torch.nn.functional as F
 try:
     import torch_scatter
 except Exception as e:
-    # Incase someone doesn't want to use dynamic pillar vfe and hasn't installed torch_scatter
-    pass
+    # Fall back to a native-PyTorch implementation when torch_scatter isn't installed
+    from ....utils import scatter_utils as torch_scatter
 
 from .vfe_template import VFETemplate
 

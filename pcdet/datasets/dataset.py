@@ -315,6 +315,9 @@ class DatasetTemplate(torch_data.Dataset):
                     ret[key] = np.stack(points, axis=0)
                 elif key in ['camera_imgs']:
                     ret[key] = torch.stack([torch.stack(imgs,dim=0) for imgs in val],dim=0)
+                elif key in ['img_process_infos']:
+                    # ragged per-camera [resize, crop, flip, rotate]; numpy>=1.24 can't stack it
+                    ret[key] = val
                 else:
                     ret[key] = np.stack(val, axis=0)
             except:

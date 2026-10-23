@@ -227,7 +227,8 @@ class CenterHead(nn.Module):
         return ret_dict
 
     def sigmoid(self, x):
-        y = torch.clamp(x.sigmoid(), min=1e-4, max=1 - 1e-4)
+        # in fp32: under AMP, 1 - 1e-4 rounds to 1.0 in fp16 and the focal loss hits log(0)
+        y = torch.clamp(x.float().sigmoid(), min=1e-4, max=1 - 1e-4)
         return y
 
     def get_loss(self):

@@ -23,7 +23,14 @@ def build_optimizer(model, optim_cfg):
         def num_children(m: nn.Module) -> int:
             return len(children(m))
 
-        flatten_model = lambda m: sum(map(flatten_model, m.children()), []) if num_children(m) else [m]
+        def own_params(m: nn.Module):
+            # parameters registered directly on a non-leaf module (e.g. swin relative_position_bias_table)
+            holder = nn.Module()
+            for name, p in m.named_parameters(recurse=False):
+                holder.register_parameter(name, p)
+            return [holder] if len(holder._parameters) > 0 else []
+
+        flatten_model = lambda m: own_params(m) + sum(map(flatten_model, m.children()), []) if num_children(m) else [m]
         get_layer_groups = lambda m: [nn.Sequential(*flatten_model(m))]
         betas = optim_cfg.get('BETAS', (0.9, 0.99))
         betas = tuple(betas)

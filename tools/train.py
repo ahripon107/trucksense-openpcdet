@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from tensorboardX import SummaryWriter
 
+from eval_utils import eval_utils
 from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_file
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, model_fn_decorator
@@ -171,6 +172,23 @@ def main():
         last_epoch=last_epoch, optim_cfg=cfg.OPTIMIZATION
     )
 
+    test_set, test_loader, sampler = build_dataloader(
+        dataset_cfg=cfg.DATA_CONFIG,
+        class_names=cfg.CLASS_NAMES,
+        batch_size=args.batch_size,
+        dist=dist_train, workers=args.workers, logger=logger, training=False
+    )
+
+    # periodic evaluation during training, enabled by OPTIMIZATION.EVAL_INTERVAL > 0
+    eval_interval = cfg.OPTIMIZATION.get('EVAL_INTERVAL', 0)
+    eval_func = None
+    if eval_interval > 0:
+        def eval_func(epoch_id):
+            return eval_utils.eval_one_epoch(
+                cfg, args, model, test_loader, epoch_id, logger, dist_test=dist_train,
+                result_dir=output_dir / 'eval' / 'eval_during_train' / ('epoch_%d' % epoch_id) / cfg.DATA_CONFIG.DATA_SPLIT['test']
+            )
+
     # -----------------------start training---------------------------
     logger.info('**********************Start training %s/%s(%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
@@ -199,7 +217,8 @@ def main():
         use_logger_to_record=not args.use_tqdm_to_record, 
         show_gpu_stat=not args.wo_gpu_stat,
         use_amp=args.use_amp,
-        cfg=cfg
+        cfg=cfg,
+        eval_func=eval_func
     )
 
     if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:
@@ -208,14 +227,13 @@ def main():
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
+    if eval_interval > 0:
+        # the final epoch was already evaluated inside train_model
+        logger.info('Skip evaluation after training: EVAL_INTERVAL=%d already evaluated the final epoch' % eval_interval)
+        return
+
     logger.info('**********************Start evaluation %s/%s(%s)**********************' %
                 (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    test_set, test_loader, sampler = build_dataloader(
-        dataset_cfg=cfg.DATA_CONFIG,
-        class_names=cfg.CLASS_NAMES,
-        batch_size=args.batch_size,
-        dist=dist_train, workers=args.workers, logger=logger, training=False
-    )
     eval_output_dir = output_dir / 'eval' / 'eval_with_train'
     eval_output_dir.mkdir(parents=True, exist_ok=True)
     args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)  # Only evaluate the last args.num_epochs_to_eval epochs

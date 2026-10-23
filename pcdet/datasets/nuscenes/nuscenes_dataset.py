@@ -401,6 +401,55 @@ def create_nuscenes_info(version, data_path, save_path, max_sweeps=10, with_cam=
             pickle.dump(val_nusc_infos, f)
 
 
+def add_camera_infos(version, data_path, max_sweeps=10):
+    """
+    Add the 6-camera calibration ('cams') to existing info files without regenerating
+    infos or the gt database. Writes nuscenes_infos_{max_sweeps}sweeps_{split}_withcam.pkl.
+    """
+    from nuscenes.nuscenes import NuScenes
+    from . import nuscenes_utils
+    data_path = data_path / version
+    nusc = NuScenes(version=version, dataroot=data_path, verbose=True)
+    camera_types = [
+        "CAM_FRONT",
+        "CAM_FRONT_RIGHT",
+        "CAM_FRONT_LEFT",
+        "CAM_BACK",
+        "CAM_BACK_LEFT",
+        "CAM_BACK_RIGHT",
+    ]
+    for split in ['train', 'val']:
+        src = data_path / f'nuscenes_infos_{max_sweeps}sweeps_{split}.pkl'
+        if not src.exists():
+            continue
+        with open(src, 'rb') as f:
+            infos = pickle.load(f)
+        for info in tqdm(infos, desc=f'add_cams_{split}', dynamic_ncols=True):
+            sample = nusc.get('sample', info['token'])
+            lidar_sd_rec = nusc.get('sample_data', sample['data']['LIDAR_TOP'])
+            lidar_cs_rec = nusc.get('calibrated_sensor', lidar_sd_rec['calibrated_sensor_token'])
+            lidar_pose_rec = nusc.get('ego_pose', lidar_sd_rec['ego_pose_token'])
+            l2e_t = np.array(lidar_cs_rec['translation'])[None]
+            l2e_r_mat = Quaternion(lidar_cs_rec['rotation']).rotation_matrix
+            e2g_t = lidar_pose_rec['translation']
+            e2g_r_mat = Quaternion(lidar_pose_rec['rotation']).rotation_matrix
+
+            info['cams'] = dict()
+            for cam in camera_types:
+                cam_token = sample['data'][cam]
+                _, _, camera_intrinsics = nusc.get_sample_data(cam_token)
+                cam_info = nuscenes_utils.obtain_sensor2top(
+                    nusc, cam_token, l2e_t, l2e_r_mat, e2g_t, e2g_r_mat, cam
+                )
+                cam_info['data_path'] = Path(cam_info['data_path']).relative_to(data_path).__str__()
+                cam_info.update(camera_intrinsics=camera_intrinsics)
+                info['cams'].update({cam: cam_info})
+        dst = data_path / f'nuscenes_infos_{max_sweeps}sweeps_{split}_withcam.pkl'
+        with open(dst, 'wb') as f:
+            pickle.dump(infos, f)
+        print(f'{split} sample: {len(infos)} -> {dst}')
+
+
 if __name__ == '__main__':
     import yaml
     import argparse
@@ -418,17 +467,24 @@ if __name__ == '__main__':
         dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         dataset_cfg.VERSION = args.version
+        # DATA_PATH may be absolute or relative to tools/, matching how train.py resolves it
+        data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve()
         create_nuscenes_info(
             version=dataset_cfg.VERSION,
-            data_path=ROOT_DIR / 'data' / 'nuscenes',
-            save_path=ROOT_DIR / 'data' / 'nuscenes',
+            data_path=data_root,
+            save_path=data_root,
             max_sweeps=dataset_cfg.MAX_SWEEPS,
             with_cam=args.with_cam
         )
 
         nuscenes_dataset = NuScenesDataset(
             dataset_cfg=dataset_cfg, class_names=None,
-            root_path=ROOT_DIR / 'data' / 'nuscenes',
+            root_path=data_root,
             logger=common_utils.create_logger(), training=True
         )
         nuscenes_dataset.create_groundtruth_database(max_sweeps=dataset_cfg.MAX_SWEEPS)
+    elif args.func == 'add_camera_infos':
+        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
+        data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve()
+        add_camera_infos(version=args.version, data_path=data_root, max_sweeps=dataset_cfg.MAX_SWEEPS)

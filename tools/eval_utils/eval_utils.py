@@ -42,7 +42,8 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         infer_time_meter = common_utils.AverageMeter()
 
     logger.info('*************** EPOCH %s EVALUATION *****************' % epoch_id)
-    if dist_test:
+    # the model may already be wrapped when evaluating during training
+    if dist_test and not isinstance(model, torch.nn.parallel.DistributedDataParallel):
         num_gpus = torch.cuda.device_count()
         local_rank = cfg.LOCAL_RANK % num_gpus
         model = torch.nn.parallel.DistributedDataParallel(
