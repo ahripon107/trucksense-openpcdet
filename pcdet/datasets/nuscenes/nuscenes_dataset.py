@@ -106,7 +106,13 @@ class NuScenesDataset(DatasetTemplate):
         sweep_points_list = [points]
         sweep_times_list = [np.zeros((points.shape[0], 1))]
 
-        for k in np.random.choice(len(info['sweeps']), max_sweeps - 1, replace=False):
+        # info['sweeps'] is ordered newest first; at inference take the most recent ones (deterministic, and
+        # TruckScenes allows at most 6 past lidar sweeps at test time), in training keep the random pick
+        if self.training:
+            sweep_ids = np.random.choice(len(info['sweeps']), max_sweeps - 1, replace=False)
+        else:
+            sweep_ids = range(min(max_sweeps - 1, len(info['sweeps'])))
+        for k in sweep_ids:
             points_sweep, times_sweep = self.get_sweep(info['sweeps'][k])
             sweep_points_list.append(points_sweep)
             sweep_times_list.append(times_sweep)
@@ -259,6 +265,11 @@ class NuScenesDataset(DatasetTemplate):
         from . import nuscenes_utils
         nusc = NuScenes(version=self.dataset_cfg.VERSION, dataroot=str(self.root_path), verbose=True)
         nusc_annos = nuscenes_utils.transform_det_annos_to_nusc_annos(det_annos, nusc)
+        if 'TRUCKSCENES' in self.dataset_cfg:
+            # the TruckScenes eval and submission server reject samples with > 500 boxes; the cap in the
+            # head config is per head, so keep the 500 highest-scoring boxes over all heads
+            for token, boxes in nusc_annos['results'].items():
+                nusc_annos['results'][token] = sorted(boxes, key=lambda b: -b['detection_score'])[:500]
         nusc_annos['meta'] = {
             'use_camera': False,
             'use_lidar': True,
@@ -277,6 +288,9 @@ class NuScenesDataset(DatasetTemplate):
 
         if self.dataset_cfg.VERSION == 'v1.0-test':
             return 'No ground-truth annotations for evaluation', {}
+
+        if 'TRUCKSCENES' in self.dataset_cfg:
+            return self.evaluation_truckscenes(res_path, output_path)
 
         from nuscenes.eval.detection.config import config_factory
         from nuscenes.eval.detection.evaluate import NuScenesEval
@@ -309,6 +323,35 @@ class NuScenesDataset(DatasetTemplate):
         result_str, result_dict = nuscenes_utils.format_nuscene_results(metrics, self.class_names, version=eval_version)
         return result_str, result_dict
 
+    def evaluation_truckscenes(self, res_path, output_path):
+        """
+        Official MAN TruckScenes detection eval (truckscenes-devkit). It reads the GT from the original
+        TruckScenes tables; the converted dataset keeps the TruckScenes sample tokens and global frame.
+        """
+        import json
+        from truckscenes import TruckScenes
+        from truckscenes.eval.detection.config import config_factory
+        from truckscenes.eval.detection.evaluate import DetectionEval
+        from . import nuscenes_utils
+
+        ts_cfg = self.dataset_cfg.TRUCKSCENES
+        trucksc = TruckScenes(version=ts_cfg.VERSION, dataroot=ts_cfg.DATA_PATH, verbose=True)
+        eval_version = ts_cfg.get('EVAL_CONFIG', 'detection_cvpr_2024')
+        ts_eval = DetectionEval(
+            trucksc,
+            config=config_factory(eval_version),
+            result_path=res_path,
+            eval_set={'v1.0-mini': 'mini_val', 'v1.0-trainval': 'val'}[self.dataset_cfg.VERSION],
+            output_dir=str(output_path),
+            verbose=True,
+        )
+        ts_eval.main(plot_examples=0, render_curves=False)
+
+        with open(output_path / 'metrics_summary.json', 'r') as f:
+            metrics = json.load(f)['all']
+
+        return nuscenes_utils.format_nuscene_results(metrics, self.class_names, version=eval_version)
+
     def create_groundtruth_database(self, used_classes=None, max_sweeps=10):
         import torch
 
@@ -325,12 +368,23 @@ class NuScenesDataset(DatasetTemplate):
             gt_boxes = info['gt_boxes']
             gt_names = info['gt_names']
 
-            box_idxs_of_pts = roiaware_pool3d_utils.points_in_boxes_gpu(
-                torch.from_numpy(points[:, 0:3]).unsqueeze(dim=0).float().cuda(),
-                torch.from_numpy(gt_boxes[:, 0:7]).unsqueeze(dim=0).float().cuda()
-            ).long().squeeze(dim=0).cpu().numpy()
+            if torch.cuda.is_available():
+                box_idxs_of_pts = roiaware_pool3d_utils.points_in_boxes_gpu(
+                    torch.from_numpy(points[:, 0:3]).unsqueeze(dim=0).float().cuda(),
+                    torch.from_numpy(gt_boxes[:, 0:7]).unsqueeze(dim=0).float().cuda()
+                ).long().squeeze(dim=0).cpu().numpy()
+            elif gt_boxes.shape[0] == 0:
+                box_idxs_of_pts = np.full(points.shape[0], -1)
+            else:
+                # CPU fallback: like the GPU kernel, each point goes to the first box containing it (-1 if none)
+                in_boxes = roiaware_pool3d_utils.points_in_boxes_cpu(
+                    points[:, 0:3], gt_boxes[:, 0:7]
+                ).astype(bool)  # (num_boxes, num_points)
+                box_idxs_of_pts = np.where(in_boxes.any(axis=0), in_boxes.argmax(axis=0), -1)
 
             for i in range(gt_boxes.shape[0]):
+                if 'gt_is_ego' in info and info['gt_is_ego'][i]:
+                    continue
                 filename = '%s_%s_%d.bin' % (sample_idx, gt_names[i], i)
                 filepath = database_save_path / filename
                 gt_points = points[box_idxs_of_pts == i]
@@ -354,7 +408,7 @@ class NuScenesDataset(DatasetTemplate):
             pickle.dump(all_db_infos, f)
 
 
-def create_nuscenes_info(version, data_path, save_path, max_sweeps=10, with_cam=False):
+def create_nuscenes_info(version, data_path, save_path, max_sweeps=10, with_cam=False, truckscenes=False):
     from nuscenes.nuscenes import NuScenes
     from nuscenes.utils import splits
     from . import nuscenes_utils
@@ -386,7 +440,9 @@ def create_nuscenes_info(version, data_path, save_path, max_sweeps=10, with_cam=
 
     train_nusc_infos, val_nusc_infos = nuscenes_utils.fill_trainval_infos(
         data_path=data_path, nusc=nusc, train_scenes=train_scenes, val_scenes=val_scenes,
-        test='test' in version, max_sweeps=max_sweeps, with_cam=with_cam
+        test='test' in version, max_sweeps=max_sweeps, with_cam=with_cam,
+        name_map=(nuscenes_utils.map_name_from_truckscenes_to_detection if truckscenes
+                  else nuscenes_utils.map_name_from_general_to_detection)
     )
 
     if version == 'v1.0-test':
@@ -474,7 +530,8 @@ if __name__ == '__main__':
             data_path=data_root,
             save_path=data_root,
             max_sweeps=dataset_cfg.MAX_SWEEPS,
-            with_cam=args.with_cam
+            with_cam=args.with_cam,
+            truckscenes='TRUCKSCENES' in dataset_cfg
         )
 
         nuscenes_dataset = NuScenesDataset(

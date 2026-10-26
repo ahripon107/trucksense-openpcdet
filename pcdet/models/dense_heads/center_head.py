@@ -138,26 +138,28 @@ class CenterHead(nn.Module):
         radius = centernet_utils.gaussian_radius(dx, dy, min_overlap=gaussian_overlap)
         radius = torch.clamp_min(radius.int(), min=min_radius)
 
-        for k in range(min(num_max_objs, gt_boxes.shape[0])):
-            if dx[k] <= 0 or dy[k] <= 0:
-                continue
+        num_objs = min(num_max_objs, gt_boxes.shape[0])
+        valid = (dx[:num_objs] > 0) & (dy[:num_objs] > 0) & \
+            (center_int[:num_objs, 0] >= 0) & (center_int[:num_objs, 0] <= feature_map_size[0]) & \
+            (center_int[:num_objs, 1] >= 0) & (center_int[:num_objs, 1] <= feature_map_size[1])
+        k = valid.nonzero()[:, 0]
 
-            if not (0 <= center_int[k][0] <= feature_map_size[0] and 0 <= center_int[k][1] <= feature_map_size[1]):
-                continue
+        # gt_boxes is on the CPU: draw the gaussians with numpy instead of a few torch ops per box
+        heatmap_np = heatmap.numpy()
+        cur_class_ids = (gt_boxes[k, -1] - 1).long().tolist()
+        for cur_class_id, cur_center, cur_radius in zip(cur_class_ids, center[k].numpy(), radius[k].tolist()):
+            centernet_utils.draw_gaussian_to_heatmap_np(heatmap_np[cur_class_id], cur_center, cur_radius)
 
-            cur_class_id = (gt_boxes[k, -1] - 1).long()
-            centernet_utils.draw_gaussian_to_heatmap(heatmap[cur_class_id], center[k], radius[k].item())
+        inds[k] = (center_int[k, 1] * feature_map_size[0] + center_int[k, 0]).long()
+        mask[k] = 1
 
-            inds[k] = center_int[k, 1] * feature_map_size[0] + center_int[k, 0]
-            mask[k] = 1
-
-            ret_boxes[k, 0:2] = center[k] - center_int_float[k].float()
-            ret_boxes[k, 2] = z[k]
-            ret_boxes[k, 3:6] = gt_boxes[k, 3:6].log()
-            ret_boxes[k, 6] = torch.cos(gt_boxes[k, 6])
-            ret_boxes[k, 7] = torch.sin(gt_boxes[k, 6])
-            if gt_boxes.shape[1] > 8:
-                ret_boxes[k, 8:] = gt_boxes[k, 7:-1]
+        ret_boxes[k, 0:2] = center[k] - center_int_float[k].float()
+        ret_boxes[k, 2] = z[k]
+        ret_boxes[k, 3:6] = gt_boxes[k, 3:6].log()
+        ret_boxes[k, 6] = torch.cos(gt_boxes[k, 6])
+        ret_boxes[k, 7] = torch.sin(gt_boxes[k, 6])
+        if gt_boxes.shape[1] > 8:
+            ret_boxes[k, 8:] = gt_boxes[k, 7:-1]
 
         return heatmap, ret_boxes, inds, mask, ret_boxes_src
 
@@ -187,24 +189,18 @@ class CenterHead(nn.Module):
 
         all_names = np.array(['bg', *self.class_names])
         for idx, cur_class_names in enumerate(self.class_names_each_head):
+            # global label -> 1-based label within this head, 0 if the class is not in this head
+            head_labels = gt_boxes.new_tensor([cur_class_names.index(name) + 1 if name in cur_class_names else 0
+                                               for name in all_names])
             heatmap_list, target_boxes_list, inds_list, masks_list, target_boxes_src_list = [], [], [], [], []
             for bs_idx in range(batch_size):
                 cur_gt_boxes = gt_boxes[bs_idx]
-                gt_class_names = all_names[cur_gt_boxes[:, -1].cpu().long().numpy()]
+                cur_head_labels = head_labels[cur_gt_boxes[:, -1].long()]
+                box_ids = cur_head_labels.nonzero()[:, 0]
 
-                gt_boxes_single_head = []
-
-                for idx, name in enumerate(gt_class_names):
-                    if name not in cur_class_names:
-                        continue
-                    temp_box = cur_gt_boxes[idx]
-                    temp_box[-1] = cur_class_names.index(name) + 1
-                    gt_boxes_single_head.append(temp_box[None, :])
-
-                if len(gt_boxes_single_head) == 0:
-                    gt_boxes_single_head = cur_gt_boxes[:0, :]
-                else:
-                    gt_boxes_single_head = torch.cat(gt_boxes_single_head, dim=0)
+                # relabels gt_boxes in place, so the following heads see these boxes with their head labels
+                cur_gt_boxes[box_ids, -1] = cur_head_labels[box_ids]
+                gt_boxes_single_head = cur_gt_boxes[box_ids]
 
                 heatmap, ret_boxes, inds, mask, ret_boxes_src = self.assign_target_of_single_head(
                     num_classes=len(cur_class_names), gt_boxes=gt_boxes_single_head.cpu(),

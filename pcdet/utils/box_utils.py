@@ -125,10 +125,47 @@ def remove_points_in_boxes3d(points, boxes3d):
     """
     boxes3d, is_numpy = common_utils.check_numpy_to_torch(boxes3d)
     points, is_numpy = common_utils.check_numpy_to_torch(points)
-    point_masks = roiaware_pool3d_utils.points_in_boxes_cpu(points[:, 0:3], boxes3d)
-    points = points[point_masks.sum(dim=0) == 0]
+    # run the exact in-box test only on points near a box (same result, without a (num_boxes, num_points)
+    # mask over the whole cloud)
+    near = torch.from_numpy(points_near_boxes_bev(points[:, 0:2].numpy(), boxes3d.numpy()))
+    keep = torch.ones(points.shape[0], dtype=torch.bool)
+    point_masks = roiaware_pool3d_utils.points_in_boxes_cpu(points[near][:, 0:3], boxes3d)
+    keep[near] = point_masks.sum(dim=0) == 0
+    points = points[keep]
 
     return points.numpy() if is_numpy else points
+
+
+def points_near_boxes_bev(points_xy, boxes3d, cell_size=1.0):
+    """
+    Conservative pre-filter for points_in_boxes_cpu: marks every point that lies in a grid cell touched by the
+    bounding square of a box footprint (padded beyond the 1 cm margin of the exact test).
+    Args:
+        points_xy: (num_points, 2)
+        boxes3d: (N, 7) [x, y, z, dx, dy, dz, heading]
+
+    Returns:
+        near: (num_points) bool
+    """
+    near = np.zeros(points_xy.shape[0], dtype=bool)
+    if boxes3d.shape[0] == 0:
+        return near
+    boxes3d = boxes3d.astype(np.float64)
+    half = np.sqrt((boxes3d[:, 3] / 2 + 0.01) ** 2 + (boxes3d[:, 4] / 2 + 0.01) ** 2) + 0.05
+    if not np.isfinite(boxes3d[:, 0:5]).all():
+        near[:] = True
+        return near
+    lo = np.floor((boxes3d[:, 0:2] - half[:, None]) / cell_size).astype(np.int64)
+    hi = np.floor((boxes3d[:, 0:2] + half[:, None]) / cell_size).astype(np.int64)
+    origin, shape = lo.min(axis=0), hi.max(axis=0) - lo.min(axis=0) + 1
+    grid = np.zeros(shape, dtype=bool)
+    for (x0, y0), (x1, y1) in zip(lo - origin, hi - origin):
+        grid[x0:x1 + 1, y0:y1 + 1] = True
+
+    cells = np.floor(points_xy / cell_size).astype(np.int64) - origin
+    inside = (cells >= 0).all(axis=1) & (cells < shape).all(axis=1)
+    near[inside] = grid[cells[inside, 0], cells[inside, 1]]
+    return near
 
 
 def boxes3d_kitti_camera_to_lidar(boxes3d_camera, calib):

@@ -1,7 +1,14 @@
 DATASET: 'NuScenesDataset'
-DATA_PATH: '/media/aminul-hoque/Samsung_T5/datasets/man_nuscenes/openpcdet'
+DATA_PATH: '/root/truckscenes-dataset/man_nuscenes/openpcdet'
 
-VERSION: 'v1.0-mini'
+VERSION: 'v1.0-trainval'
+
+# TruckScenes class map (12 detection classes) and the official truckscenes-devkit eval,
+# which reads the GT from the original TruckScenes tables
+TRUCKSCENES:
+    DATA_PATH: '/root/truckscenes-dataset/man-truckscenes'
+    VERSION: 'v1.2-trainval'
+    EVAL_CONFIG: 'detection_cvpr_2024'
 MAX_SWEEPS: 10
 PRED_VELOCITY: True
 SET_NAN_VELOCITY_TO_ZEROS: True
@@ -17,7 +24,7 @@ INFO_PATH: {
     'test': [nuscenes_infos_10sweeps_val.pkl],
 }
 
-POINT_CLOUD_RANGE: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+POINT_CLOUD_RANGE: [-153.6, -153.6, -4.0, 153.6, 153.6, 4.0]
 
 BALANCED_RESAMPLING: True 
 
@@ -29,14 +36,16 @@ DATA_AUGMENTOR:
               - nuscenes_dbinfos_10sweeps_withvelo.pkl
           PREPARE: {
              filter_by_min_points: [
-                 'car:5','truck:5', 'construction_vehicle:5', 'bus:5', 'trailer:5',
-                 'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5'
+                 'car:5','truck:5', 'other_vehicle:5', 'bus:5', 'trailer:5',
+                 'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5',
+                 'animal:5', 'traffic_sign:5'
              ],
           }
 
           SAMPLE_GROUPS: [
-              'car:2','truck:3', 'construction_vehicle:7', 'bus:4', 'trailer:6',
-              'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2'
+              'car:2','truck:3', 'other_vehicle:7', 'bus:4', 'trailer:6',
+              'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2',
+              'animal:6', 'traffic_sign:2'
           ]
 
           NUM_POINT_FEATURES: 5

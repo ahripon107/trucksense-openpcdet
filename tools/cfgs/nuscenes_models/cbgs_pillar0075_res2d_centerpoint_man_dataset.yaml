@@ -1,9 +1,11 @@
-CLASS_NAMES: ['car','truck', 'construction_vehicle', 'bus', 'trailer',
-              'barrier', 'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone']
+CLASS_NAMES: ['car', 'truck', 'bus', 'trailer', 'other_vehicle', 'pedestrian',
+              'motorcycle', 'bicycle', 'traffic_cone', 'barrier', 'animal', 'traffic_sign']
 
 DATA_CONFIG:
     _BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_dataset.yaml
-    POINT_CLOUD_RANGE: [-54.0, -54.0, -5.0, 54.0, 54.0, 3.0]
+    POINT_CLOUD_RANGE: [-153.6, -153.6, -4.0, 153.6, 153.6, 4.0]
+    # current frame + 4 past sweeps; TruckScenes allows at most 6 past lidar sweeps at test time
+    MAX_SWEEPS: 5
 
     DATA_AUGMENTOR:
         DISABLE_AUG_LIST: ['placeholder']
@@ -13,14 +15,16 @@ DATA_CONFIG:
                 - nuscenes_dbinfos_10sweeps_withvelo.pkl
               PREPARE: {
                 filter_by_min_points: [
-                    'car:5','truck:5', 'construction_vehicle:5', 'bus:5', 'trailer:5',
-                    'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5'
+                    'car:5','truck:5', 'other_vehicle:5', 'bus:5', 'trailer:5',
+                    'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5',
+                    'animal:5', 'traffic_sign:5'
                 ],
               }
 
               SAMPLE_GROUPS: [
-                'car:2','truck:3', 'construction_vehicle:7', 'bus:4', 'trailer:6',
-                'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2'
+                'car:2','truck:3', 'other_vehicle:7', 'bus:4', 'trailer:6',
+                'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2',
+                'animal:6', 'traffic_sign:2'
               ]
 
               NUM_POINT_FEATURES: 5
@@ -51,12 +55,13 @@ DATA_CONFIG:
             'test': True
           }
 
-        - NAME: transform_points_to_voxels
-          VOXEL_SIZE: [0.075, 0.075, 0.2]
+        # DynamicPillarVFESimple2D builds pillars from the raw points, so skip voxelization in the workers
+        - NAME: transform_points_to_voxels_placeholder
+          VOXEL_SIZE: [0.15, 0.15, 0.2]
           MAX_POINTS_PER_VOXEL: 10
           MAX_NUMBER_OF_VOXELS: {
-            'train': 120000,
-            'test': 160000
+            'train': 300000,
+            'test': 400000
           }
 
 
@@ -89,11 +94,12 @@ MODEL:
 
         CLASS_NAMES_EACH_HEAD: [
             ['car'], 
-            ['truck', 'construction_vehicle'],
+            ['truck', 'other_vehicle'],
             ['bus', 'trailer'],
             ['barrier'],
             ['motorcycle', 'bicycle'],
-            ['pedestrian', 'traffic_cone'],
+            ['pedestrian', 'traffic_cone', 'animal'],
+            ['traffic_sign'],
         ]
 
         SHARED_CONV_CHANNEL: 64
@@ -124,7 +130,7 @@ MODEL:
 
         POST_PROCESSING:
             SCORE_THRESH: 0.1
-            POST_CENTER_LIMIT_RANGE: [-61.2, -61.2, -10.0, 61.2, 61.2, 10.0]
+            POST_CENTER_LIMIT_RANGE: [-160.0, -160.0, -10.0, 160.0, 160.0, 10.0]
             MAX_OBJ_PER_SAMPLE: 500
             NMS_CONFIG:
                 NMS_TYPE: nms_gpu
@@ -142,7 +148,8 @@ MODEL:
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 4
     NUM_EPOCHS: 20
-    EVAL_INTERVAL: 1
+    # per-epoch eval runs out of host RAM next to the training workers; evaluate checkpoints with test.py
+    EVAL_INTERVAL: 0
 
     OPTIMIZER: adam_onecycle
     LR: 0.001
