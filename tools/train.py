@@ -50,6 +50,9 @@ def parse_config():
     parser.add_argument('--ckpt_save_time_interval', type=int, default=300, help='in terms of seconds')
     parser.add_argument('--wo_gpu_stat', action='store_true', help='')
     parser.add_argument('--use_amp', action='store_true', help='use mix precision training')
+    parser.add_argument('--num_threads', type=int, default=8,
+                        help='torch CPU threads of the main process; the default (one per core) competes with the '
+                             'dataloader workers and slows every step')
     
 
     args = parser.parse_args()
@@ -87,6 +90,8 @@ def main():
         args.batch_size = args.batch_size // total_gpus
 
     args.epochs = cfg.OPTIMIZATION.NUM_EPOCHS if args.epochs is None else args.epochs
+
+    torch.set_num_threads(args.num_threads)
 
     if args.fix_random_seed:
         common_utils.set_random_seed(666 + cfg.LOCAL_RANK)

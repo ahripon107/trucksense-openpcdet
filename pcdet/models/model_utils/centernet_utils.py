@@ -69,6 +69,28 @@ def draw_gaussian_to_heatmap(heatmap, center, radius, k=1, valid_mask=None):
     return heatmap
 
 
+def draw_gaussian_to_heatmap_np(heatmap, center, radius):
+    """
+    numpy version of draw_gaussian_to_heatmap (k=1, no valid_mask), updates the (H, W) float32 heatmap in place
+    """
+    diameter = 2 * radius + 1
+    gaussian = gaussian2D((diameter, diameter), sigma=diameter / 6)
+
+    x, y = int(center[0]), int(center[1])
+
+    height, width = heatmap.shape[0:2]
+
+    left, right = min(x, radius), min(width - x, radius + 1)
+    top, bottom = min(y, radius), min(height - y, radius + 1)
+
+    masked_heatmap = heatmap[y - top:y + bottom, x - left:x + right]
+    masked_gaussian = gaussian[radius - top:radius + bottom, radius - left:radius + right].astype(np.float32)
+
+    if min(masked_gaussian.shape) > 0 and min(masked_heatmap.shape) > 0:
+        np.maximum(masked_heatmap, masked_gaussian, out=masked_heatmap)
+    return heatmap
+
+
 def _nms(heat, kernel=3):
     pad = (kernel - 1) // 2
 

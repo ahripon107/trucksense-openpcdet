@@ -167,7 +167,9 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
             train_loader.dataset.merge_all_iters_to_one_epoch(merge=True, epochs=total_epochs)
             total_it_each_epoch = len(train_loader) // max(total_epochs, 1)
 
-        dataloader_iter = iter(train_loader)
+        # train_one_epoch creates its own iterator when an epoch covers the whole loader; an unused one here
+        # would keep its workers and prefetched batches alive for the whole run
+        dataloader_iter = iter(train_loader) if total_it_each_epoch != len(train_loader) else None
         for cur_epoch in tbar:
             if train_sampler is not None:
                 train_sampler.set_epoch(cur_epoch)
@@ -178,7 +180,7 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
             else:
                 cur_scheduler = lr_scheduler
             
-            augment_disable_flag = disable_augmentation_hook(hook_config, dataloader_iter, total_epochs, cur_epoch, cfg, augment_disable_flag, logger)
+            augment_disable_flag = disable_augmentation_hook(hook_config, train_loader, total_epochs, cur_epoch, cfg, augment_disable_flag, logger)
             accumulated_iter = train_one_epoch(
                 model, optimizer, train_loader, model_func,
                 lr_scheduler=cur_scheduler,
@@ -279,6 +281,6 @@ def disable_augmentation_hook(hook_config, dataloader, total_epochs, cur_epoch, 
                 dataset_cfg=cfg.DATA_CONFIG
                 logger.info(f'Disable augmentations: {DISABLE_AUG_LIST}')
                 dataset_cfg.DATA_AUGMENTOR.DISABLE_AUG_LIST = DISABLE_AUG_LIST
-                dataloader._dataset.data_augmentor.disable_augmentation(dataset_cfg.DATA_AUGMENTOR)
+                dataloader.dataset.data_augmentor.disable_augmentation(dataset_cfg.DATA_AUGMENTOR)
                 flag = True
     return flag
