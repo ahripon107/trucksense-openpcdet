@@ -39,6 +39,18 @@ map_name_from_general_to_detection = {
     'static_object.bicycle_rack': 'ignore',
 }
 
+# MAN TruckScenes converted to nuScenes format: the 12 TruckScenes detection classes,
+# following truckscenes.eval.detection.utils.category_to_detection_name
+map_name_from_truckscenes_to_detection = {
+    **map_name_from_general_to_detection,
+    'animal': 'animal',
+    'vehicle.construction': 'other_vehicle',
+    'vehicle.other': 'other_vehicle',
+    'vehicle.ego_trailer': 'trailer',
+    'static_object.traffic_sign': 'traffic_sign',
+    'vehicle.train': 'ignore',
+}
+
 
 cls_attr_dist = {
     'barrier': {
@@ -152,6 +164,12 @@ cls_attr_dist = {
         'vehicle.stopped': 11097,
     },
 }
+# TruckScenes-only classes ('' = class without attributes)
+cls_attr_dist.update({
+    'other_vehicle': cls_attr_dist['construction_vehicle'],
+    'traffic_sign': {'traffic_sign.pole_mounted': 1},
+    'animal': {'': 1},
+})
 
 
 def get_available_scenes(nusc):
@@ -309,7 +327,8 @@ def obtain_sensor2top(
     return sweep
 
 
-def fill_trainval_infos(data_path, nusc, train_scenes, val_scenes, test=False, max_sweeps=10, with_cam=False):
+def fill_trainval_infos(data_path, nusc, train_scenes, val_scenes, test=False, max_sweeps=10, with_cam=False,
+                        name_map=map_name_from_general_to_detection):
     train_nusc_infos = []
     val_nusc_infos = []
     progress_bar = tqdm.tqdm(total=len(nusc.sample), desc='create_info', dynamic_ncols=True)
@@ -454,7 +473,9 @@ def fill_trainval_infos(data_path, nusc, train_scenes, val_scenes, test=False, m
 
             info['gt_boxes'] = gt_boxes[mask, :]
             info['gt_boxes_velocity'] = velocity[mask, :]
-            info['gt_names'] = np.array([map_name_from_general_to_detection[name] for name in names])[mask]
+            info['gt_names'] = np.array([name_map[name] for name in names])[mask]
+            # TruckScenes: the truck's own trailer is labeled 'trailer' but kept out of the gt database
+            info['gt_is_ego'] = (names == 'vehicle.ego_trailer')[mask]
             info['gt_boxes_token'] = tokens[mask]
             info['num_lidar_pts'] = num_lidar_pts[mask]
             info['num_radar_pts'] = num_radar_pts[mask]
@@ -524,7 +545,7 @@ def transform_det_annos_to_nusc_annos(det_annos, nusc):
         for k, box in enumerate(box_list):
             name = det['name'][k]
             if np.sqrt(box.velocity[0] ** 2 + box.velocity[1] ** 2) > 0.2:
-                if name in ['car', 'construction_vehicle', 'bus', 'truck', 'trailer']:
+                if name in ['car', 'construction_vehicle', 'other_vehicle', 'bus', 'truck', 'trailer']:
                     attr = 'vehicle.moving'
                 elif name in ['bicycle', 'motorcycle']:
                     attr = 'cycle.with_rider'
