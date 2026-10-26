@@ -290,8 +290,8 @@ class DataProcessor(object):
 
             rotation = torch.eye(2)
             translation = torch.zeros(2)
-            # post-homography transformation
-            rotation *= resize
+            # post-homography transformation; resize: one factor, or (x, y) factors
+            rotation *= torch.tensor(np.broadcast_to(resize, 2), dtype=torch.float32)[:, None]
             translation -= torch.Tensor(crop[:2])
             if flip:
                 A = torch.Tensor([[-1, 0], [0, 1]])
@@ -314,6 +314,47 @@ class DataProcessor(object):
             transform[:2, 3] = translation
             transforms.append(transform.numpy())
         data_dict["img_aug_matrix"] = transforms
+        return data_dict
+
+    def camera_depth_targets(self, data_dict=None, config=None):
+        """
+        Depth supervision for the camera branch (BEVDepth-style): lidar points projected into every augmented image
+        (run it after image_calibrate and before image_normalize),
+        as 'camera_depth_targets' (num_cams, H / DOWNSAMPLE, W / DOWNSAMPLE), the nearest depth [m] in each feature
+        cell, 0 where no point lands. Points are mapped back through lidar_aug_matrix first, so the depths are in the
+        un-augmented camera frame the view transform's frustum uses; positions go through img_aug_matrix.
+        Only points with timestamp <= MAX_TIME_LAG (last point feature) are used: past sweeps smear moving objects.
+        """
+        if data_dict is None:
+            return partial(self.camera_depth_targets, config=config)
+
+        final_w, final_h = data_dict['camera_imgs'][0].size  # PIL images after resize / crop / imgaug
+        stride = config.DOWNSAMPLE
+        assert final_h % stride == 0 and final_w % stride == 0
+        points = data_dict['points']
+        points = points[points[:, -1] <= config.get('MAX_TIME_LAG', 0.0) + 1e-4, 0:3].astype(np.float64)
+        lidar_aug = data_dict['lidar_aug_matrix']
+        orig = (points - lidar_aug[:3, 3]) @ np.linalg.inv(lidar_aug[:3, :3]).T
+
+        num_cams = len(data_dict['lidar2image'])
+        targets = np.zeros((num_cams, final_h // stride, final_w // stride), dtype=np.float32)
+        for c in range(num_cams):
+            lidar2image = np.asarray(data_dict['lidar2image'][c], dtype=np.float64)
+            img_aug = np.asarray(data_dict['img_aug_matrix'][c], dtype=np.float64)
+            q = orig @ lidar2image[:3, :3].T + lidar2image[:3, 3]
+            depth = q[:, 2]
+            front = depth > config.get('MIN_DEPTH', 0.5)
+            uv = q[front, :2] / depth[front, None]
+            uv = uv @ img_aug[:2, :2].T + img_aug[:2, 3]
+            depth = depth[front]
+            on_img = (uv[:, 0] >= 0) & (uv[:, 0] < final_w) & (uv[:, 1] >= 0) & (uv[:, 1] < final_h)
+            uv, depth = uv[on_img], depth[on_img]
+            # each cell keeps its nearest point
+            cells = (uv // stride).astype(np.int64)
+            nearest = np.full(targets[c].size, np.inf)
+            np.minimum.at(nearest, cells[:, 1] * targets.shape[2] + cells[:, 0], depth)
+            targets[c] = np.where(np.isfinite(nearest), nearest, 0).reshape(targets[c].shape)
+        data_dict['camera_depth_targets'] = targets
         return data_dict
 
     def forward(self, data_dict):

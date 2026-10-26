@@ -23,6 +23,8 @@ class NuScenesDataset(DatasetTemplate):
         if self.camera_config is not None:
             self.use_camera = self.camera_config.get('USE_CAMERA', True)
             self.camera_image_config = self.camera_config.IMAGE
+            # images may live outside the converted dataset (TruckScenes: the original sensor data)
+            self.camera_data_path = Path(self.camera_config.get('DATA_PATH', self.root_path))
         else:
             self.use_camera = False
 
@@ -161,7 +163,8 @@ class NuScenesDataset(DatasetTemplate):
             img = img.resize(resize_dims)
             img = img.crop(crop)
             crop_images.append(img)
-            img_process_infos.append([resize, crop, False, 0])
+            # the integer image size makes the real scale differ slightly per axis; record that one
+            img_process_infos.append([(newW / W, newH / H), crop, False, 0])
         
         input_dict['img_process_infos'] = img_process_infos
         input_dict['camera_imgs'] = crop_images
@@ -191,6 +194,9 @@ class NuScenesDataset(DatasetTemplate):
             # camera intrinsics
             camera_intrinsics = np.eye(4).astype(np.float32)
             camera_intrinsics[:3, :3] = camera_info["camera_intrinsics"]
+            # img_aug_matrix (resize x * s, flip W - x) treats pixel i as [i, i + 1]; intrinsics put pixel centers on
+            # integers, so 0.5 moves them to the same convention (else up to ~1 px error after a flip)
+            camera_intrinsics[:2, 2] += self.camera_config.get('PIXEL_CENTER_OFFSET', 0.0)
             input_dict["camera_intrinsics"].append(camera_intrinsics)
 
             # lidar to image transform
@@ -214,7 +220,7 @@ class NuScenesDataset(DatasetTemplate):
         filename = input_dict["image_paths"]
         images = []
         for name in filename:
-            images.append(Image.open(str(self.root_path / name)))
+            images.append(Image.open(str(self.camera_data_path / name)))
         
         input_dict["camera_imgs"] = images
         input_dict["ori_shape"] = images[0].size
@@ -282,7 +288,7 @@ class NuScenesDataset(DatasetTemplate):
             for token, boxes in nusc_annos['results'].items():
                 nusc_annos['results'][token] = sorted(boxes, key=lambda b: -b['detection_score'])[:500]
         nusc_annos['meta'] = {
-            'use_camera': False,
+            'use_camera': self.use_camera,
             'use_lidar': True,
             'use_radar': self.dataset_cfg.get('RADAR', None) is not None,
             'use_map': False,
@@ -650,6 +656,17 @@ if __name__ == '__main__':
             truckscenes_version=dataset_cfg.TRUCKSCENES.VERSION,
             info_names=[f'nuscenes_infos_{dataset_cfg.MAX_SWEEPS}sweeps_{split}.pkl' for split in ['train', 'val']],
             max_sweeps=args.radar_sweeps
+        )
+    elif args.func == 'add_truckscenes_camera_infos':
+        # 4 TruckScenes cameras from the original tables, on top of the radar infos
+        from .truckscenes_camera import add_camera_infos as add_truckscenes_camera_infos
+        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
+        data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve() / args.version
+        add_truckscenes_camera_infos(
+            data_path=data_root, truckscenes_path=dataset_cfg.TRUCKSCENES.DATA_PATH,
+            truckscenes_version=dataset_cfg.TRUCKSCENES.VERSION,
+            info_names=[f'nuscenes_infos_10sweeps_{split}_withradar.pkl' for split in ['train', 'val']]
         )
     elif args.func == 'create_radar_gt_database':
         # --cfg_file: the radar model config (DATA_CONFIG with RADAR and the *_withradar INFO_PATH); run from tools/

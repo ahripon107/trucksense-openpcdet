@@ -120,6 +120,30 @@ python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint
 `python tests/test_radar_fusion.py` (from `tools/`, CPU, about 30 s) checks the compensation, the augmentations, the
 GT sampling, the model losses and the checkpoint loading.
 
+### Cameras (Phase 2, data side)
+
+`tools/cfgs/dataset_configs/man_nuscenes_radar_camera_dataset.yaml` adds the 4 cameras (`CAMERA_LEFT_FRONT`,
+`CAMERA_RIGHT_FRONT`, `CAMERA_LEFT_BACK`, `CAMERA_RIGHT_BACK`) to the lidar + radar data, for the BEVFusion-style models.
+
+- The images are read in place from the original TruckScenes data (`CAMERA_CONFIG.DATA_PATH`). Each camera's
+  camera → lidar transform uses that camera's ego pose, because the back cameras fire about 35 ms off the lidar.
+- Image size is set in the config: `CAMERA_CONFIG.IMAGE.FINAL_DIM` (448 × 960 by default; 384 × 832 is a smaller option)
+  and `RESIZE_LIM_*`. Image flip and rotation come from `imgaug`. `img_aug_matrix` records the exact per-axis resize,
+  and `PIXEL_CENTER_OFFSET: 0.5` moves the intrinsics to its pixel-edge convention.
+- `camera_depth_targets` stores the nearest current-sweep lidar depth of each image feature cell (`DOWNSAMPLE`), for
+  depth supervision.
+- No GT sampling: pasted lidar and radar objects have no image content.
+
+```shell
+python -m pcdet.datasets.nuscenes.nuscenes_dataset --func add_truckscenes_camera_infos \
+    --cfg_file tools/cfgs/dataset_configs/man_nuscenes_dataset.yaml --version v1.0-trainval   # ~2 min, 0.6 GB
+cd tools && python tests/test_camera_data.py
+```
+
+The test projects 3D points through the full augmented pipeline and checks that they land on the drawn image pixels
+(< 1 px, no bias) and that the view transform's geometry maps them back. It also writes
+`output/camera_aug_overlay.jpg`, which shows the GT boxes on the augmented images.
+
 ## Training
 
 Run from `tools/`:

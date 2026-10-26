@@ -1,0 +1,117 @@
+# MAN TruckScenes, lidar + 6 radars + 4 cameras, for the camera fusion models (Phase 2).
+# Standalone (nested _BASE_CONFIG_ is not resolved): same as man_nuscenes_dataset.yaml + the radar settings of
+# cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml + the cameras.
+DATASET: 'NuScenesDataset'
+DATA_PATH: '/root/truckscenes-dataset/man_nuscenes/openpcdet'
+
+VERSION: 'v1.0-trainval'
+
+TRUCKSCENES:
+    DATA_PATH: '/root/truckscenes-dataset/man-truckscenes'
+    VERSION: 'v1.2-trainval'
+    EVAL_CONFIG: 'detection_cvpr_2024'
+MAX_SWEEPS: 5
+PRED_VELOCITY: True
+SET_NAN_VELOCITY_TO_ZEROS: True
+FILTER_MIN_POINTS_IN_GT: 1
+
+DATA_SPLIT: {
+    'train': train,
+    'test': val
+}
+
+# radar sweeps (--func add_radar_infos) + camera calibration (--func add_truckscenes_camera_infos)
+INFO_PATH: {
+    'train': [nuscenes_infos_10sweeps_train_withradar_withcam.pkl],
+    'test': [nuscenes_infos_10sweeps_val_withradar_withcam.pkl],
+}
+
+POINT_CLOUD_RANGE: [-153.6, -153.6, -4.0, 153.6, 153.6, 4.0]
+
+BALANCED_RESAMPLING: True
+
+RADAR:
+    DATA_PATH: '/root/truckscenes-dataset/man-truckscenes'
+    MAX_SWEEPS: 7
+
+# CAMERA_LEFT_FRONT, CAMERA_RIGHT_FRONT, CAMERA_LEFT_BACK, CAMERA_RIGHT_BACK keyframes (1980 x 943), read in place
+CAMERA_CONFIG:
+    USE_CAMERA: True
+    DATA_PATH: '/root/truckscenes-dataset/man-truckscenes'
+    # intrinsics -> the pixel-edge convention of img_aug_matrix (see NuScenesDataset.load_camera_info)
+    PIXEL_CENTER_OFFSET: 0.5
+    IMAGE:
+        # [H, W] fed to the network. Each image is resized by a factor from RESIZE_LIM_* (0.485 -> 960 x 457),
+        # then cropped to FINAL_DIM: rows from the top (sky), columns at random (train) / centered (test).
+        # Smaller alternative: FINAL_DIM [384, 832] with RESIZE_LIM_TRAIN [0.42, 0.48], RESIZE_LIM_TEST [0.42, 0.42].
+        FINAL_DIM: [448, 960]
+        RESIZE_LIM_TRAIN: [0.485, 0.55]
+        RESIZE_LIM_TEST: [0.485, 0.485]
+
+# no gt_sampling: pasted lidar/radar objects would have no matching image content
+DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+        - NAME: random_world_flip
+          ALONG_AXIS_LIST: ['x', 'y']
+
+        - NAME: random_world_rotation
+          WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+        - NAME: random_world_scaling
+          WORLD_SCALE_RANGE: [0.9, 1.1]
+
+        - NAME: random_world_translation
+          NOISE_TRANSLATE_STD: [0.5, 0.5, 0.5]
+
+        # per camera: horizontal flip and rotation [deg] (resize/crop: CAMERA_CONFIG.IMAGE)
+        - NAME: imgaug
+          ROT_LIM: [-5.4, 5.4]
+          RAND_FLIP: True
+
+POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp'],
+    src_feature_list: ['x', 'y', 'z', 'intensity', 'timestamp'],
+}
+
+DATA_PROCESSOR:
+    - NAME: mask_points_and_boxes_outside_range
+      REMOVE_OUTSIDE_BOXES: True
+
+    - NAME: shuffle_points
+      SHUFFLE_ENABLED: {
+        'train': True,
+        'test': True
+      }
+
+    - NAME: transform_points_to_voxels
+      VOXEL_SIZE: [0.15, 0.15, 0.2]
+      MAX_POINTS_PER_VOXEL: 10
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 300000,
+        'test': 400000
+      }
+
+    - NAME: transform_radar_points_to_voxels
+      VOXEL_SIZE: [0.6, 0.6, 8.0]
+      USED_FEATURES: ['x', 'y', 'z', 'rcs', 'vx_comp', 'vy_comp', 'v_r', 'time_lag']
+      MAX_POINTS_PER_VOXEL: 10
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 40000,
+        'test': 40000
+      }
+
+    # img_aug_matrix from the resize / crop / flip / rotation of each image
+    - NAME: image_calibrate
+
+    # lidar depth of each image feature cell, for the depth loss; DOWNSAMPLE = the stride of the image features the
+    # view transform lifts (FINAL_DIM must be divisible by it)
+    - NAME: camera_depth_targets
+      DOWNSAMPLE: 8
+      MAX_TIME_LAG: 0.0
+      MIN_DEPTH: 0.5
+
+    - NAME: image_normalize
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
