@@ -86,6 +86,40 @@ Both configs share these settings:
 - **Training:** CBGS class-balanced resampling, GT sampling, and 20 epochs with a one-cycle Adam schedule.
 - **Range:** The 153.6 m range covers the challenge's 150 m evaluation distance for vehicles.
 
+## Radar–lidar fusion
+
+`tools/cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml` (`RadarFusionCenterPoint`)
+adds a radar pillar branch to the voxel CenterPoint and fuses the two BEV maps before `BACKBONE_2D`.
+
+- **Radar data:** the converted dataset has no radar, so the 6 radars are read from the original TruckScenes data
+  (`RADAR.DATA_PATH`). Each sample gets the keyframe plus `RADAR.MAX_SWEEPS - 1` past sweeps of each radar (20 Hz;
+  the challenge allows 11 past sweeps), in `data_dict['radar_points']`. TruckScenes `vrel` is the raw Doppler along the ray, so
+  the radial velocity is compensated with the ego chassis velocity and yaw rate. Columns:
+  `pcdet/utils/radar_utils.py`.
+- **Augmentation:** flip, rotation, scaling and translation move the radar points and their velocity vectors and rays.
+  GT sampling pastes each object's own radar returns from a radar GT database and recomputes their radial velocity for the
+  pasted position.
+- **Model:** `RadarPillarVFE` → `RadarPointPillarScatter` (0.6 m pillars) → `RadarBEVBackbone` (stride 2) gives the
+  lidar BEV grid (256 × 256, 1.2 m cells). `RadarLidarBEVFuser` adds convs over the concatenated maps to the lidar BEV.
+  Training-only aux CenterHeads: lidar `[center, center_z, dim, rot]` and radar `[center, vel]` + a Doppler consistency loss,
+  logged as `train/aux_lidar/*` and `train/aux_radar/*`.
+
+Build the radar infos (about 3 min) and the radar GT database (about 5 min, 0.9 GB), then train starting from the lidar model:
+
+```shell
+python -m pcdet.datasets.nuscenes.nuscenes_dataset --func add_radar_infos \
+    --cfg_file tools/cfgs/dataset_configs/man_nuscenes_dataset.yaml --version v1.0-trainval
+cd tools
+python -m pcdet.datasets.nuscenes.nuscenes_dataset --func create_radar_gt_database \
+    --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml --version v1.0-trainval
+python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml \
+    --extra_tag v1 --workers 8 --batch_size 4 --use_amp \
+    --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_man_dataset/v3_150m/ckpt/checkpoint_epoch_4.pth
+```
+
+`python tests/test_radar_fusion.py` (from `tools/`, CPU, about 30 s) checks the compensation, the augmentations, the
+GT sampling, the model losses and the checkpoint loading.
+
 ## Training
 
 Run from `tools/`:

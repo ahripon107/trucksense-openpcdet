@@ -123,6 +123,15 @@ class NuScenesDataset(DatasetTemplate):
         points = np.concatenate((points, times), axis=1)
         return points
 
+    def get_radar_with_sweeps(self, index):
+        """
+        Ego-motion compensated radar points of the 6 TruckScenes radars, keyframe + RADAR.MAX_SWEEPS - 1 past sweeps
+        each, in the lidar frame; needs the *_withradar infos (columns: utils/radar_utils.RADAR_FEATURES).
+        """
+        from .truckscenes_radar import load_radar_points
+        radar_cfg = self.dataset_cfg.RADAR
+        return load_radar_points(self.infos[index], radar_cfg.DATA_PATH, max_sweeps=radar_cfg.MAX_SWEEPS)
+
     def crop_image(self, input_dict):
         W, H = input_dict["ori_shape"]
         imgs = input_dict["camera_imgs"]
@@ -233,6 +242,8 @@ class NuScenesDataset(DatasetTemplate):
             'frame_id': Path(info['lidar_path']).stem,
             'metadata': {'token': info['token']}
         }
+        if self.dataset_cfg.get('RADAR', None) is not None:
+            input_dict['radar_points'] = self.get_radar_with_sweeps(index)
 
         if 'gt_boxes' in info:
             if self.dataset_cfg.get('FILTER_MIN_POINTS_IN_GT', False):
@@ -273,7 +284,7 @@ class NuScenesDataset(DatasetTemplate):
         nusc_annos['meta'] = {
             'use_camera': False,
             'use_lidar': True,
-            'use_radar': False,
+            'use_radar': self.dataset_cfg.get('RADAR', None) is not None,
             'use_map': False,
             'use_external': False,
         }
@@ -408,6 +419,87 @@ class NuScenesDataset(DatasetTemplate):
             pickle.dump(all_db_infos, f)
 
 
+_radar_db_dataset = None
+
+
+def _radar_points_of_gt_boxes(args):
+    """Worker of create_radar_groundtruth_database: [(gt_idx, radar points relative to the box center)] of a sample."""
+    from ...utils import box_utils
+    idx, gt_indices, extra_width = args
+    dataset = _radar_db_dataset
+    radar_points = dataset.get_radar_with_sweeps(idx)
+    gt_boxes = dataset.infos[idx]['gt_boxes'][:, 0:7].astype(np.float32)
+    out = []
+    if len(radar_points) == 0 or len(gt_boxes) == 0:
+        return idx, [(i, radar_points[:0]) for i in gt_indices]
+    large_boxes = box_utils.enlarge_box3d(gt_boxes, extra_width=extra_width).numpy()
+    near = box_utils.points_near_boxes_bev(radar_points[:, 0:2], large_boxes)
+    box_idxs_of_pts = np.full(len(radar_points), -1)
+    if near.any():
+        # like the lidar database: each point goes to the first box containing it
+        in_boxes = np.asarray(roiaware_pool3d_utils.points_in_boxes_cpu(
+            radar_points[near, 0:3], large_boxes)).astype(bool)
+        box_idxs_of_pts[near] = np.where(in_boxes.any(axis=0), in_boxes.argmax(axis=0), -1)
+    for i in gt_indices:
+        pts = radar_points[box_idxs_of_pts == i].copy()
+        pts[:, :3] -= gt_boxes[i, :3]
+        out.append((i, pts))
+    return idx, out
+
+
+def create_radar_groundtruth_database(dataset, lidar_db_info_path, extra_width=(1.0, 1.0, 2.0), num_workers=4):
+    """
+    Radar counterpart of the lidar GT database, for gt_sampling of the radar fusion models. Every lidar db_info
+    (same sample index and gt index) gets the radar points of its box, enlarged by extra_width (radar returns
+    scatter around the object): all of them go into one flat float32 file and each db_info stores its
+    'radar_offset' rows. A pasted object then brings the radar returns it really had (possibly none).
+    dataset must hold the *_withradar train infos in the order the lidar database was built from.
+    """
+    import multiprocessing
+    from ...utils.radar_utils import RADAR_FEATURES
+    global _radar_db_dataset
+
+    max_sweeps = dataset.dataset_cfg.RADAR.MAX_SWEEPS
+    with open(lidar_db_info_path, 'rb') as f:
+        all_db_infos = pickle.load(f)
+    db_infos_of_sample = {}
+    for name, db_infos in all_db_infos.items():
+        for db_info in db_infos:
+            info = dataset.infos[db_info['image_idx']]
+            assert info['gt_names'][db_info['gt_idx']] == name and \
+                np.allclose(info['gt_boxes'][db_info['gt_idx']], db_info['box3d_lidar'], equal_nan=True), \
+                'the infos are not the ones the lidar GT database was built from'
+            db_infos_of_sample.setdefault(db_info['image_idx'], {})[db_info['gt_idx']] = db_info
+
+    stem = Path(lidar_db_info_path).stem
+    data_save_path = dataset.root_path / f'gt_database_radar_{max_sweeps}sweeps.bin'
+    db_info_save_path = dataset.root_path / f'{stem}_radar{max_sweeps}sweeps.pkl'
+    _radar_db_dataset = dataset
+    offset, num_feat = 0, len(RADAR_FEATURES)
+    jobs = [(idx, sorted(gt.keys()), tuple(extra_width)) for idx, gt in sorted(db_infos_of_sample.items())]
+    with open(data_save_path, 'wb') as f_data, multiprocessing.get_context('fork').Pool(num_workers) as pool:
+        for idx, per_box in tqdm(pool.imap(_radar_points_of_gt_boxes, jobs, chunksize=8), total=len(jobs),
+                                 desc='radar gt database', dynamic_ncols=True):
+            for gt_idx, pts in per_box:
+                assert pts.shape[1] == num_feat
+                pts.astype(np.float32).tofile(f_data)
+                db_info = db_infos_of_sample[idx][gt_idx]
+                db_info['radar_offset'] = (offset, offset + len(pts))
+                db_info['num_radar_points_in_gt'] = len(pts)
+                offset += len(pts)
+    _radar_db_dataset = None
+
+    for name, db_infos in all_db_infos.items():
+        num_with_radar = sum(x['num_radar_points_in_gt'] > 0 for x in db_infos)
+        print('Radar database %s: %d / %d objects with radar points' % (name, num_with_radar, len(db_infos)))
+    for db_infos in all_db_infos.values():
+        for db_info in db_infos:
+            db_info['radar_path'] = str(data_save_path.relative_to(dataset.root_path))
+    with open(db_info_save_path, 'wb') as f:
+        pickle.dump(all_db_infos, f)
+    print(f'{offset} radar points ({offset * num_feat * 4 / 1e9:.2f} GB) -> {data_save_path}, infos -> {db_info_save_path}')
+
+
 def create_nuscenes_info(version, data_path, save_path, max_sweeps=10, with_cam=False, truckscenes=False):
     from nuscenes.nuscenes import NuScenes
     from nuscenes.utils import splits
@@ -517,6 +609,9 @@ if __name__ == '__main__':
     parser.add_argument('--func', type=str, default='create_nuscenes_infos', help='')
     parser.add_argument('--version', type=str, default='v1.0-trainval', help='')
     parser.add_argument('--with_cam', action='store_true', default=False, help='use camera or not')
+    parser.add_argument('--lidar_db_info', type=str, default='nuscenes_dbinfos_10sweeps_withvelo.pkl',
+                        help='lidar GT database the radar GT database is paired with')
+    parser.add_argument('--radar_sweeps', type=int, default=12, help='radar keyframe + past sweeps kept in the infos')
     args = parser.parse_args()
 
     if args.func == 'create_nuscenes_infos':
@@ -545,3 +640,29 @@ if __name__ == '__main__':
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve()
         add_camera_infos(version=args.version, data_path=data_root, max_sweeps=dataset_cfg.MAX_SWEEPS)
+    elif args.func == 'add_radar_infos':
+        from .truckscenes_radar import add_radar_infos
+        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
+        data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve() / args.version
+        add_radar_infos(
+            data_path=data_root, truckscenes_path=dataset_cfg.TRUCKSCENES.DATA_PATH,
+            truckscenes_version=dataset_cfg.TRUCKSCENES.VERSION,
+            info_names=[f'nuscenes_infos_{dataset_cfg.MAX_SWEEPS}sweeps_{split}.pkl' for split in ['train', 'val']],
+            max_sweeps=args.radar_sweeps
+        )
+    elif args.func == 'create_radar_gt_database':
+        # --cfg_file: the radar model config (DATA_CONFIG with RADAR and the *_withradar INFO_PATH); run from tools/
+        from ...config import cfg_from_yaml_file, cfg
+        ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
+        cfg_from_yaml_file(args.cfg_file, cfg)
+        dataset_cfg = cfg.DATA_CONFIG if 'DATA_CONFIG' in cfg else cfg
+        dataset_cfg.VERSION = args.version
+        data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve()
+        nuscenes_dataset = NuScenesDataset(
+            dataset_cfg=dataset_cfg, class_names=None, root_path=data_root,
+            logger=common_utils.create_logger(), training=True
+        )
+        create_radar_groundtruth_database(
+            nuscenes_dataset, nuscenes_dataset.root_path / args.lidar_db_info
+        )

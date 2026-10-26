@@ -5,6 +5,7 @@ from .point_head_box import PointHeadBox
 from .point_head_simple import PointHeadSimple
 from .point_intra_part_head import PointIntraPartOffsetHead
 from .center_head import CenterHead
+from .aux_center_head import AuxCenterHead, RadarAuxCenterHead
 from .voxelnext_head import VoxelNeXtHead
 from .transfusion_head import TransFusionHead
 
@@ -16,6 +17,8 @@ __all__ = {
     'PointHeadBox': PointHeadBox,
     'AnchorHeadMulti': AnchorHeadMulti,
     'CenterHead': CenterHead,
+    'AuxCenterHead': AuxCenterHead,
+    'RadarAuxCenterHead': RadarAuxCenterHead,
     'VoxelNeXtHead': VoxelNeXtHead,
     'TransFusionHead': TransFusionHead,
 }

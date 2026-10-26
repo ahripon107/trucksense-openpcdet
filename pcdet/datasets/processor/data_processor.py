@@ -4,7 +4,7 @@ import numpy as np
 from skimage import transform
 import torch
 import torchvision
-from ...utils import box_utils, common_utils
+from ...utils import box_utils, common_utils, radar_utils
 
 tv = None
 try:
@@ -68,9 +68,11 @@ class DataProcessor(object):
         self.num_point_features = num_point_features
         self.mode = 'train' if training else 'test'
         self.grid_size = self.voxel_size = None
+        self.radar_grid_size = self.radar_voxel_size = self.radar_num_point_features = None
         self.data_processor_queue = []
 
         self.voxel_generator = None
+        self.radar_voxel_generator = None
 
         for cur_cfg in processor_configs:
             cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)
@@ -83,6 +85,10 @@ class DataProcessor(object):
         if data_dict.get('points', None) is not None:
             mask = common_utils.mask_points_by_range(data_dict['points'], self.point_cloud_range)
             data_dict['points'] = data_dict['points'][mask]
+
+        if data_dict.get('radar_points', None) is not None:
+            mask = common_utils.mask_points_by_range(data_dict['radar_points'], self.point_cloud_range)
+            data_dict['radar_points'] = data_dict['radar_points'][mask]
 
         if data_dict.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
             mask = box_utils.mask_boxes_outside_range_numpy(
@@ -177,6 +183,36 @@ class DataProcessor(object):
             data_dict['voxels'] = voxels
             data_dict['voxel_coords'] = coordinates
             data_dict['voxel_num_points'] = num_points
+        return data_dict
+
+    def transform_radar_points_to_voxels(self, data_dict=None, config=None):
+        """
+        Pillars of the radar points ('radar_voxels', 'radar_voxel_coords', 'radar_voxel_num_points'), built from the
+        USED_FEATURES columns of 'radar_points'. 'radar_points' itself keeps all columns for the radar losses.
+        """
+        if data_dict is None:
+            grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
+            self.radar_grid_size = np.round(grid_size).astype(np.int64)
+            self.radar_voxel_size = config.VOXEL_SIZE
+            self.radar_num_point_features = len(config.USED_FEATURES)
+            assert config.USED_FEATURES[:3] == ['x', 'y', 'z']
+            return partial(self.transform_radar_points_to_voxels, config=config)
+
+        if self.radar_voxel_generator is None:
+            self.radar_voxel_generator = VoxelGeneratorWrapper(
+                vsize_xyz=config.VOXEL_SIZE,
+                coors_range_xyz=self.point_cloud_range,
+                num_point_features=self.radar_num_point_features,
+                max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
+            )
+
+        used = [radar_utils.RADAR_COL[name] for name in config.USED_FEATURES]
+        radar_points = np.ascontiguousarray(data_dict['radar_points'][:, used])
+        voxels, coordinates, num_points = self.radar_voxel_generator.generate(radar_points)
+        data_dict['radar_voxels'] = voxels
+        data_dict['radar_voxel_coords'] = coordinates
+        data_dict['radar_voxel_num_points'] = num_points
         return data_dict
 
     def sample_points(self, data_dict=None, config=None):

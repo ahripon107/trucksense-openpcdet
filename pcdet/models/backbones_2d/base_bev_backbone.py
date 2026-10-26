@@ -57,7 +57,7 @@ class BaseBEVBackbone(nn.Module):
                         nn.ReLU()
                     ))
                 else:
-                    stride = np.round(1 / stride).astype(np.int)
+                    stride = int(np.round(1 / stride))
                     self.deblocks.append(nn.Sequential(
                         nn.Conv2d(
                             num_filters[idx], num_upsample_filters[idx],
@@ -112,6 +112,14 @@ class BaseBEVBackbone(nn.Module):
         return data_dict
 
 
+class RadarBEVBackbone(BaseBEVBackbone):
+    """BaseBEVBackbone on 'radar_spatial_features', writing 'radar_spatial_features_2d'."""
+    def forward(self, data_dict):
+        radar_dict = super().forward({'spatial_features': data_dict['radar_spatial_features']})
+        data_dict['radar_spatial_features_2d'] = radar_dict['spatial_features_2d']
+        return data_dict
+
+
 class BaseBEVBackboneV1(nn.Module):
     def __init__(self, model_cfg, **kwargs):
         super().__init__()
@@ -158,7 +166,7 @@ class BaseBEVBackboneV1(nn.Module):
                         nn.ReLU()
                     ))
                 else:
-                    stride = np.round(1 / stride).astype(np.int)
+                    stride = int(np.round(1 / stride))
                     self.deblocks.append(nn.Sequential(
                         nn.Conv2d(
                             num_filters[idx], num_upsample_filters[idx],
@@ -296,7 +304,7 @@ class BaseBEVResBackbone(nn.Module):
                         nn.ReLU()
                     ))
                 else:
-                    stride = np.round(1 / stride).astype(np.int)
+                    stride = int(np.round(1 / stride))
                     self.deblocks.append(nn.Sequential(
                         nn.Conv2d(
                             num_filters[idx], num_upsample_filters[idx],

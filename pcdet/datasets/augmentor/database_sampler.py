@@ -9,7 +9,7 @@ import SharedArray
 import torch.distributed as dist
 
 from ...ops.iou3d_nms import iou3d_nms_utils
-from ...utils import box_utils, common_utils, calibration_kitti
+from ...utils import box_utils, common_utils, calibration_kitti, radar_utils
 from pcdet.datasets.kitti.kitti_object_eval_python import kitti_common
 
 class DataBaseSampler(object):
@@ -27,6 +27,7 @@ class DataBaseSampler(object):
             self.db_infos[class_name] = []
 
         self.use_shared_memory = sampler_cfg.get('USE_SHARED_MEMORY', False)
+        self._radar_database = None  # memmap of the radar GT database, opened in each worker on first use
 
         for db_info_path in sampler_cfg.DB_INFO_PATH:
             db_info_path = self.root_path.resolve() / db_info_path
@@ -64,6 +65,7 @@ class DataBaseSampler(object):
     def __getstate__(self):
         d = dict(self.__dict__)
         del d['logger']
+        d['_radar_database'] = None
         return d
 
     def __setstate__(self, d):
@@ -362,6 +364,23 @@ class DataBaseSampler(object):
             raise NotImplementedError
         return data_dict
 
+    def get_radar_object_points(self, info, sampled_box):
+        """
+        Radar points of a database object at the pasted box: the database keeps them relative to the source box
+        center, and their radial velocity is recomputed for the pasted position (radar_utils.move_object_points).
+        """
+        assert 'radar_offset' in info, \
+            'radar_points in the scene but the GT database has no radar: use the *_radar*sweeps.pkl db infos'
+        if self._radar_database is None:
+            self._radar_database = np.memmap(self.root_path / info['radar_path'], dtype=np.float32, mode='r').reshape(
+                -1, len(radar_utils.RADAR_FEATURES))
+        start, end = info['radar_offset']
+        obj_radar = np.array(self._radar_database[start:end])
+        src_box = info['box3d_lidar']
+        obj_radar[:, :3] += src_box[:3].astype(np.float32)
+        box_velocity = np.nan_to_num(sampled_box[7:9].astype(np.float64)) if len(sampled_box) >= 9 else np.zeros(2)
+        return radar_utils.move_object_points(obj_radar, sampled_box[:3] - src_box[:3], box_velocity)
+
     def add_sampled_boxes_to_scene(self, data_dict, sampled_gt_boxes, total_valid_sampled_dict, mv_height=None, sampled_gt_boxes2d=None):
         gt_boxes_mask = data_dict['gt_boxes_mask']
         gt_boxes = data_dict['gt_boxes'][gt_boxes_mask]
@@ -431,6 +450,18 @@ class DataBaseSampler(object):
         )
         points = box_utils.remove_points_in_boxes3d(points, large_sampled_gt_boxes)
         points = np.concatenate([obj_points[:, :points.shape[-1]], points], axis=0)
+
+        if 'radar_points' in data_dict:
+            # pasted objects bring the radar returns they had; the scene's radar returns inside them are removed
+            obj_radar = np.concatenate([
+                self.get_radar_object_points(info, sampled_gt_boxes[idx])
+                for idx, info in enumerate(total_valid_sampled_dict)
+            ], axis=0)
+            radar_points = data_dict['radar_points']
+            if len(radar_points) > 0:
+                radar_points = box_utils.remove_points_in_boxes3d(radar_points, box_utils.enlarge_box3d(
+                    sampled_gt_boxes[:, 0:7], extra_width=self.sampler_cfg.RADAR_REMOVE_EXTRA_WIDTH))
+            data_dict['radar_points'] = np.concatenate([obj_radar.astype(radar_points.dtype), radar_points], axis=0)
         gt_names = np.concatenate([gt_names, sampled_gt_names], axis=0)
         gt_boxes = np.concatenate([gt_boxes, sampled_gt_boxes], axis=0)
         data_dict['gt_boxes'] = gt_boxes
