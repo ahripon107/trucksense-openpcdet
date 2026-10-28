@@ -26,14 +26,18 @@ class AuxCenterHead(CenterHead):
         self.input_key = model_cfg.INPUT_KEY
         self.loss_prefix = model_cfg.LOSS_PREFIX
         self.aux_loss_weight = model_cfg.get('AUX_LOSS_WEIGHT', 1.0)
+        # run in fp32 under AMP: the camera heatmap convs grew large enough to overflow fp16 (inf BN statistics)
+        self.force_fp32 = model_cfg.get('FORCE_FP32', False)
         self.target_columns = [c for name in self.separate_head_cfg.HEAD_ORDER for c in self.TARGET_COLUMNS[name]]
         assert len(model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['code_weights']) == len(self.target_columns), \
             f'{self.loss_prefix}: code_weights must have one weight per column of {self.separate_head_cfg.HEAD_ORDER}'
 
     def forward(self, data_dict):
         assert self.training, 'auxiliary heads only run in training mode'
-        x = self.shared_conv(data_dict[self.input_key])
-        pred_dicts = [head(x) for head in self.heads_list]
+        x = data_dict[self.input_key]
+        with torch.autocast(device_type=x.device.type, enabled=torch.is_autocast_enabled() and not self.force_fp32):
+            x = self.shared_conv(x.float() if self.force_fp32 else x)
+            pred_dicts = [head(x) for head in self.heads_list]
 
         # assign_targets relabels gt_boxes in place, and the next heads still need the original labels
         target_dict = self.assign_targets(
@@ -45,8 +49,20 @@ class AuxCenterHead(CenterHead):
         self.forward_ret_dict['pred_dicts'] = pred_dicts
         return data_dict
 
+    def get_heatmap_loss(self):
+        """CenterHead.get_loss for an empty HEAD_ORDER (heatmap only, nothing to regress)."""
+        tb_dict = {}
+        loss = 0
+        for idx, pred_dict in enumerate(self.forward_ret_dict['pred_dicts']):
+            hm_loss = self.hm_loss_func(self.sigmoid(pred_dict['hm']), self.forward_ret_dict['target_dicts']['heatmaps'][idx])
+            hm_loss *= self.model_cfg.LOSS_CONFIG.LOSS_WEIGHTS['cls_weight']
+            loss += hm_loss
+            tb_dict['hm_loss_head_%d' % idx] = hm_loss.item()
+        tb_dict['rpn_loss'] = loss.item()
+        return loss, tb_dict
+
     def get_loss(self):
-        loss, tb_dict = super().get_loss()
+        loss, tb_dict = super().get_loss() if len(self.target_columns) > 0 else self.get_heatmap_loss()
         loss = loss * self.aux_loss_weight
         tb_dict = {f'{self.loss_prefix}/{"loss" if key == "rpn_loss" else key}': val for key, val in tb_dict.items()}
         tb_dict[f'{self.loss_prefix}/loss'] = loss.item()

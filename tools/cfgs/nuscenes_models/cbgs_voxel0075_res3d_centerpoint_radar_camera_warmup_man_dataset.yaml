@@ -1,0 +1,33 @@
+# Phase 2, stage A: warm-up of everything new. The lidar model is frozen (weights and BN statistics); the camera and
+# radar branches and the 3 aux heads train on their own losses (camera aux heatmap + depth, radar aux + Doppler, lidar
+# aux on the frozen lidar BEV), so the fresh modules do not disturb the trained detector, and in stage B no random aux
+# head sends its large early gradients into the lidar backbone. The fusers and the shared detector are not run in
+# training.
+# The radar branch is trained here because Phase 1 (lidar + radar) was skipped: this starts from the lidar-only
+# checkpoint. Both fusers stay at their zero init, so this model still predicts exactly like the lidar model.
+# Then stage B (joint): cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml
+#python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_warmup_man_dataset.yaml \
+#      --extra_tag v1 --workers 16 --batch_size 4 --use_amp \
+#      --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_man_dataset/v3_150m/ckpt/checkpoint_epoch_4.pth
+_BASE_CONFIG_: cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml
+
+# the base file's DATA_CONFIG._BASE_CONFIG_ is not resolved through a top-level _BASE_CONFIG_; resolve it here
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_radar_camera_dataset.yaml
+
+MODEL:
+    # module names of build_networks; frozen modules keep requires_grad False and their BNs in eval mode
+    FREEZE_MODULES: [
+        'vfe', 'backbone_3d', 'map_to_bev_module',
+        'fuser', 'camera_fuser', 'backbone_2d', 'dense_head',
+    ]
+    # losses that are summed; only the modules they need run in training
+    TRAIN_LOSSES: ['aux_camera', 'depth', 'aux_radar', 'aux_lidar']
+
+    MODALITY_DROPOUT:
+        RADAR: 0.0
+        CAMERA: 0.0
+
+OPTIMIZATION:
+    NUM_EPOCHS: 1  # aux / depth losses fall ~30x in the first 100 iterations
+    LR: 0.001

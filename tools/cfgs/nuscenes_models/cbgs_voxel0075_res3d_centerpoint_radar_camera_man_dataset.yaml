@@ -1,0 +1,326 @@
+CLASS_NAMES: ['car', 'truck', 'bus', 'trailer', 'other_vehicle', 'pedestrian',
+              'motorcycle', 'bicycle', 'traffic_cone', 'barrier', 'animal', 'traffic_sign']
+
+# Phase 2: the lidar + radar model (cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml) + the 4 cameras.
+# Camera branch: Swin-T + FPN -> camera-only LSS onto the shared 256 x 256 / 1.2 m BEV -> CAMERA_FUSER, added to the
+# lidar + radar BEV. Stage B (joint training). Stage A warms the camera branch up first:
+# cbgs_voxel0075_res3d_centerpoint_radar_camera_warmup_man_dataset.yaml
+#python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml \
+#      --extra_tag v1 --workers 16 --batch_size 4 --use_amp \
+#      --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_warmup_man_dataset/v1/ckpt/checkpoint_epoch_1.pth
+DATA_CONFIG:
+    # lidar + radar + cameras; image size: CAMERA_CONFIG.IMAGE.FINAL_DIM (must match VTRANSFORM.IMAGE_SIZE)
+    _BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_radar_camera_dataset.yaml
+
+
+MODEL:
+    NAME: RadarCameraFusionCenterPoint
+
+    # ---------------- lidar branch (same as the lidar-only model) ----------------
+    VFE:
+        NAME: MeanVFE
+
+    BACKBONE_3D:
+        NAME: VoxelResBackBone8x
+
+    MAP_TO_BEV:
+        NAME: HeightCompression
+        NUM_BEV_FEATURES: 256
+
+    # ---------------- radar branch (same as Phase 1) ----------------
+    RADAR_VFE:
+        NAME: RadarPillarVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64]
+
+    RADAR_MAP_TO_BEV:
+        NAME: RadarPointPillarScatter
+        NUM_BEV_FEATURES: 64
+
+    RADAR_BACKBONE_2D:
+        NAME: RadarBEVBackbone
+        LAYER_NUMS: [3, 3]
+        LAYER_STRIDES: [1, 2]
+        NUM_FILTERS: [64, 128]
+        UPSAMPLE_STRIDES: [0.5, 1]
+        NUM_UPSAMPLE_FILTERS: [64, 64]
+
+    # ---------------- camera branch ----------------
+    IMAGE_BACKBONE:
+        NAME: SwinTransformer
+        EMBED_DIMS: 96
+        DEPTHS: [2, 2, 6, 2]
+        NUM_HEADS: [3, 6, 12, 24]
+        WINDOW_SIZE: 7
+        MLP_RATIO: 4
+        DROP_RATE: 0.
+        ATTN_DROP_RATE: 0.
+        DROP_PATH_RATE: 0.2
+        PATCH_NORM: True
+        OUT_INDICES: [1, 2, 3]  # strides 8, 16, 32
+        WITH_CP: False
+        CONVERT_WEIGHTS: True
+        INIT_CFG:
+            type: Pretrained
+            # official ImageNet-1k Swin-T weights (github.com/SwinTransformer/storage, v1.0.0)
+            checkpoint: ../pretrained/swin_tiny_patch4_window7_224.pth
+
+    NECK:
+        NAME: GeneralizedLSSFPN
+        IN_CHANNELS: [192, 384, 768]
+        OUT_CHANNELS: 256
+        START_LEVEL: 0
+        END_LEVEL: -1
+        NUM_OUTS: 3
+
+    # camera-only LSS on the stride-8 FPN level (448 x 960 -> 56 x 120); 0.6 m splat, DOWNSAMPLE 2 -> the 256 x 256 /
+    # 1.2 m lidar BEV grid. The camera BEV goes to OUTPUT_KEY, so it does not overwrite the lidar spatial_features.
+    VTRANSFORM:
+        NAME: LSSTransform
+        OUTPUT_KEY: camera_spatial_features
+        IMAGE_SIZE: [448, 960]
+        IN_CHANNEL: 256
+        OUT_CHANNEL: 80
+        FEATURE_SIZE: [56, 120]
+        XBOUND: [-153.6, 153.6, 0.6]
+        YBOUND: [-153.6, 153.6, 0.6]
+        ZBOUND: [-10.0, 10.0, 20.0]
+        # depth bins whose width grows linearly with depth (LID), dense near the truck, to the BEV corner range
+        DEPTH_BINS:
+            MODE: LID
+            MIN: 1.0
+            MAX: 153.6
+            NUM: 120
+        DOWNSAMPLE: 2
+        # BEVDepth: BCE of the predicted depth distribution vs the binned camera_depth_targets (cells with lidar only);
+        # the targets' DOWNSAMPLE (data config) must be the stride of the lifted FPN level
+        DEPTH_LOSS:
+            TARGET_KEY: camera_depth_targets
+            WEIGHT: 3.0
+
+    # ---------------- fusion: lidar + radar (Phase 1), then + camera ----------------
+    FUSER:
+        NAME: RadarLidarBEVFuser
+        NUM_FILTERS: [256]
+
+    # same residual fuser on (lidar + radar BEV, camera BEV); its last BN starts at zero, so the model starts out as
+    # the Phase 1 model
+    CAMERA_FUSER:
+        NAME: RadarLidarBEVFuser
+        LIDAR_KEY: spatial_features
+        RADAR_KEY: camera_spatial_features
+        BACKUP_KEY: lidar_radar_spatial_features
+        NUM_FILTERS: [256]
+
+    # per sample in training, the BEV of a dropped modality is zeroed before the fusers (never lidar: the
+    # leaderboard always has it), so the detector does not rely on a single sensor
+    MODALITY_DROPOUT:
+        RADAR: 0.1
+        CAMERA: 0.1
+
+    # ---------------- auxiliary heads (training only, on each branch's BEV before fusion) ----------------
+    AUX_HEADS:
+        LIDAR:
+            NAME: AuxCenterHead
+            INPUT_KEY: spatial_features
+            LOSS_PREFIX: aux_lidar
+            AUX_LOSS_WEIGHT: 0.5
+            CLASS_AGNOSTIC: False
+            CLASS_NAMES_EACH_HEAD: [
+                ['car'],
+                ['truck', 'other_vehicle'],
+                ['bus', 'trailer'],
+                ['barrier'],
+                ['motorcycle', 'bicycle'],
+                ['pedestrian', 'traffic_cone', 'animal'],
+                ['traffic_sign'],
+            ]
+            SHARED_CONV_CHANNEL: 64
+            USE_BIAS_BEFORE_NORM: True
+            NUM_HM_CONV: 2
+            SEPARATE_HEAD_CFG:
+                HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+                HEAD_DICT: {
+                    'center': {'out_channels': 2, 'num_conv': 2},
+                    'center_z': {'out_channels': 1, 'num_conv': 2},
+                    'dim': {'out_channels': 3, 'num_conv': 2},
+                    'rot': {'out_channels': 2, 'num_conv': 2},
+                }
+            TARGET_ASSIGNER_CONFIG:
+                FEATURE_MAP_STRIDE: 8
+                NUM_MAX_OBJS: 500
+                GAUSSIAN_OVERLAP: 0.1
+                MIN_RADIUS: 2
+            LOSS_CONFIG:
+                LOSS_WEIGHTS: {
+                    'cls_weight': 1.0,
+                    'loc_weight': 0.25,
+                    'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+                }
+
+        RADAR:
+            NAME: RadarAuxCenterHead
+            INPUT_KEY: radar_spatial_features_2d
+            LOSS_PREFIX: aux_radar
+            AUX_LOSS_WEIGHT: 0.5
+            CLASS_AGNOSTIC: False
+            CLASS_NAMES_EACH_HEAD: [
+                ['car'],
+                ['truck', 'other_vehicle'],
+                ['bus', 'trailer'],
+                ['barrier'],
+                ['motorcycle', 'bicycle'],
+                ['pedestrian', 'traffic_cone', 'animal'],
+                ['traffic_sign'],
+            ]
+            SHARED_CONV_CHANNEL: 64
+            USE_BIAS_BEFORE_NORM: True
+            NUM_HM_CONV: 2
+            SEPARATE_HEAD_CFG:
+                HEAD_ORDER: ['center', 'vel']
+                HEAD_DICT: {
+                    'center': {'out_channels': 2, 'num_conv': 2},
+                    'vel': {'out_channels': 2, 'num_conv': 2},
+                }
+            TARGET_ASSIGNER_CONFIG:
+                FEATURE_MAP_STRIDE: 8
+                NUM_MAX_OBJS: 500
+                GAUSSIAN_OVERLAP: 0.1
+                MIN_RADIUS: 2
+            LOSS_CONFIG:
+                LOSS_WEIGHTS: {
+                    'cls_weight': 1.0,
+                    'loc_weight': 0.25,
+                    'code_weights': [1.0, 1.0, 1.0, 1.0]
+                }
+            DOPPLER_LOSS:
+                WEIGHT: 0.2
+                BOX_EXTRA_WIDTH: [1.0, 1.0, 2.0]
+                BETA: 1.0
+
+        # heatmap only: camera BEV positions are too coarse for box regression early on
+        CAMERA:
+            NAME: AuxCenterHead
+            INPUT_KEY: camera_spatial_features
+            LOSS_PREFIX: aux_camera
+            AUX_LOSS_WEIGHT: 0.5
+            # fp16 overflowed in its heatmap convs during stage A (inf BN statistics)
+            FORCE_FP32: True
+            CLASS_AGNOSTIC: False
+            CLASS_NAMES_EACH_HEAD: [
+                ['car'],
+                ['truck', 'other_vehicle'],
+                ['bus', 'trailer'],
+                ['barrier'],
+                ['motorcycle', 'bicycle'],
+                ['pedestrian', 'traffic_cone', 'animal'],
+                ['traffic_sign'],
+            ]
+            SHARED_CONV_CHANNEL: 64
+            USE_BIAS_BEFORE_NORM: True
+            NUM_HM_CONV: 2
+            SEPARATE_HEAD_CFG:
+                HEAD_ORDER: []
+                HEAD_DICT: {}
+            TARGET_ASSIGNER_CONFIG:
+                FEATURE_MAP_STRIDE: 8
+                NUM_MAX_OBJS: 500
+                GAUSSIAN_OVERLAP: 0.1
+                MIN_RADIUS: 2
+            LOSS_CONFIG:
+                LOSS_WEIGHTS: {
+                    'cls_weight': 1.0,
+                    'loc_weight': 0.0,
+                    'code_weights': []
+                }
+
+    # ---------------- shared detector on the fused BEV (same as the lidar-only model) ----------------
+    BACKBONE_2D:
+        NAME: BaseBEVBackbone
+
+        LAYER_NUMS: [5, 5]
+        LAYER_STRIDES: [1, 2]
+        NUM_FILTERS: [128, 256]
+        UPSAMPLE_STRIDES: [1, 2]
+        NUM_UPSAMPLE_FILTERS: [256, 256]
+
+    DENSE_HEAD:
+        NAME: CenterHead
+        CLASS_AGNOSTIC: False
+
+        CLASS_NAMES_EACH_HEAD: [
+            ['car'],
+            ['truck', 'other_vehicle'],
+            ['bus', 'trailer'],
+            ['barrier'],
+            ['motorcycle', 'bicycle'],
+            ['pedestrian', 'traffic_cone', 'animal'],
+            ['traffic_sign'],
+        ]
+
+        SHARED_CONV_CHANNEL: 64
+        USE_BIAS_BEFORE_NORM: True
+        NUM_HM_CONV: 2
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot', 'vel']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+                'vel': {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 8
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [-160.0, -160.0, -10.0, 160.0, 160.0, 10.0]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+
+        EVAL_METRIC: kitti
+
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 6
+    NUM_EPOCHS: 6
+    # per-epoch eval runs out of host RAM next to the training workers; evaluate checkpoints with test.py
+    EVAL_INTERVAL: 0
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.00075
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
+
+    GRAD_NORM_CLIP: 10

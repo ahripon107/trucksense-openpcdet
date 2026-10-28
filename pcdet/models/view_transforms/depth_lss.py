@@ -27,7 +27,7 @@ class DepthLSSTransform(nn.Module):
         xbound = self.model_cfg.XBOUND
         ybound = self.model_cfg.YBOUND
         zbound = self.model_cfg.ZBOUND
-        self.dbound = self.model_cfg.DBOUND
+        self.dbound = self.model_cfg.get('DBOUND', None)  # LSSTransform may use DEPTH_BINS instead
         downsample = self.model_cfg.DOWNSAMPLE
 
         dx, bx, nx = gen_dx_bx(xbound, ybound, zbound)

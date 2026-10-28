@@ -127,6 +127,14 @@ def set_random_seed(seed):
 
 
 def worker_init_fn(worker_id, seed=666):
+    # each worker would otherwise run its torch / numpy (BLAS, OpenMP) ops on all cores, and the workers and the
+    # training process then fight over the CPU (mostly system time)
+    torch.set_num_threads(1)
+    try:
+        from threadpoolctl import threadpool_limits
+        threadpool_limits(1)
+    except ImportError:
+        pass
     if seed is not None:
         random.seed(seed + worker_id)
         np.random.seed(seed + worker_id)

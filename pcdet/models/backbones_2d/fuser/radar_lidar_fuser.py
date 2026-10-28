@@ -13,6 +13,8 @@ class RadarLidarBEVFuser(nn.Module):
         self.model_cfg = model_cfg
         self.lidar_key = model_cfg.get('LIDAR_KEY', 'spatial_features')
         self.radar_key = model_cfg.get('RADAR_KEY', 'radar_spatial_features_2d')
+        # where the unfused LIDAR_KEY input is kept (a second fuser on the same key needs its own)
+        self.backup_key = model_cfg.get('BACKUP_KEY', 'lidar_' + self.lidar_key)
 
         layers = []
         c_in = lidar_channels + radar_channels
@@ -37,13 +39,13 @@ class RadarLidarBEVFuser(nn.Module):
                 radar_spatial_features_2d: (B, C_radar, H, W) radar BEV, same grid and extent
         Returns:
             batch_dict:
-                spatial_features: (B, C_lidar, H, W) fused BEV (the lidar BEV stays in lidar_spatial_features)
+                spatial_features: (B, C_lidar, H, W) fused BEV (the input BEV stays in BACKUP_KEY)
         """
         lidar_bev = batch_dict[self.lidar_key]
         radar_bev = batch_dict[self.radar_key]
         assert lidar_bev.shape[0] == radar_bev.shape[0] and lidar_bev.shape[2:] == radar_bev.shape[2:], \
             f'lidar BEV {tuple(lidar_bev.shape)} and radar BEV {tuple(radar_bev.shape)} must share the grid'
         fused = lidar_bev + self.fuse(torch.cat([lidar_bev, radar_bev.to(lidar_bev.dtype)], dim=1))
-        batch_dict['lidar_' + self.lidar_key] = lidar_bev
+        batch_dict[self.backup_key] = lidar_bev
         batch_dict[self.lidar_key] = fused
         return batch_dict
