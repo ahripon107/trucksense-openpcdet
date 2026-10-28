@@ -27,14 +27,14 @@ python setup.py develop
 
 ### 1. Convert TruckScenes to nuScenes format
 
-The converter, `truckscenes_to_nuscenes.py`, is kept outside this repository. It:
+The converter is `tools/truckscenes_to_nuscenes.py` (it needs `pip install python-lzf`). It:
 
 - merges the 6 lidars of each frame into one virtual `LIDAR_TOP`, motion-compensated with the ego poses;
 - renames scenes to nuScenes split names, following the official TruckScenes train/val split;
 - writes the nuScenes tables, dropping only `vehicle.train` annotations.
 
 ```shell
-python truckscenes_to_nuscenes.py \
+python tools/truckscenes_to_nuscenes.py \
     --meta  <truckscenes>/man-truckscenes/v1.2-trainval \
     --data  <sensordata-root-1>/man-truckscenes <sensordata-root-2>/man-truckscenes ... \
     --out   /root/truckscenes-dataset/man_nuscenes/openpcdet --version v1.0-trainval
