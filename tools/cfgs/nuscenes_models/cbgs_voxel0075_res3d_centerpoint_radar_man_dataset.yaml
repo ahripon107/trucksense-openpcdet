@@ -1,0 +1,305 @@
+CLASS_NAMES: ['car', 'truck', 'bus', 'trailer', 'other_vehicle', 'pedestrian',
+              'motorcycle', 'bicycle', 'traffic_cone', 'barrier', 'animal', 'traffic_sign']
+
+# Voxel CenterPoint (cbgs_voxel0075_res3d_centerpoint_man_dataset.yaml) + a radar pillar branch fused in BEV.
+# Initialise the lidar modules from the lidar-only model:
+#python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_man_dataset.yaml \
+#      --extra_tag v1 --workers 8 --batch_size 4 --use_amp \
+#      --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_man_dataset/v3_150m/ckpt/checkpoint_epoch_4.pth
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_dataset.yaml
+    MAX_SWEEPS: 5
+    POINT_CLOUD_RANGE: [-153.6, -153.6, -4.0, 153.6, 153.6, 4.0]
+
+    # infos with the radar sweeps (nuscenes_dataset --func add_radar_infos)
+    INFO_PATH: {
+        'train': [nuscenes_infos_10sweeps_train_withradar.pkl],
+        'test': [nuscenes_infos_10sweeps_val_withradar.pkl],
+    }
+
+    # 6 radars at 20 Hz, keyframe + MAX_SWEEPS - 1 past sweeps each (TruckScenes allows 11 past radar sweeps
+    # at test time); points come ego-motion compensated in data_dict['radar_points'], see utils/radar_utils.py
+    RADAR:
+        DATA_PATH: '/root/truckscenes-dataset/man-truckscenes'
+        MAX_SWEEPS: 7
+
+    DATA_AUGMENTOR:
+        DISABLE_AUG_LIST: ['placeholder']
+        AUG_CONFIG_LIST:
+            - NAME: gt_sampling
+              # lidar database + the radar points of each object (nuscenes_dataset --func create_radar_gt_database);
+              # the radar sweeps of the database must match RADAR.MAX_SWEEPS
+              DB_INFO_PATH:
+                - nuscenes_dbinfos_10sweeps_withvelo_radar7sweeps.pkl
+              PREPARE: {
+                filter_by_min_points: [
+                    'car:5','truck:5', 'other_vehicle:5', 'bus:5', 'trailer:5',
+                    'barrier:5', 'motorcycle:5', 'bicycle:5', 'pedestrian:5', 'traffic_cone:5',
+                    'animal:5', 'traffic_sign:5'
+                ],
+              }
+
+              SAMPLE_GROUPS: [
+                'car:2','truck:3', 'other_vehicle:7', 'bus:4', 'trailer:6',
+                'barrier:2', 'motorcycle:6', 'bicycle:6', 'pedestrian:2', 'traffic_cone:2',
+                'animal:6', 'traffic_sign:2'
+              ]
+
+              NUM_POINT_FEATURES: 5
+              DATABASE_WITH_FAKELIDAR: False
+              REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+              # scene radar points are removed from the pasted boxes enlarged like the radar database boxes
+              RADAR_REMOVE_EXTRA_WIDTH: [1.0, 1.0, 2.0]
+              LIMIT_WHOLE_SCENE: True
+
+            - NAME: random_world_flip
+              ALONG_AXIS_LIST: ['x', 'y']
+
+            - NAME: random_world_rotation
+              WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+            - NAME: random_world_scaling
+              WORLD_SCALE_RANGE: [0.9, 1.1]
+
+            - NAME: random_world_translation
+              NOISE_TRANSLATE_STD: [0.5, 0.5, 0.5]
+
+
+    DATA_PROCESSOR:
+        - NAME: mask_points_and_boxes_outside_range
+          REMOVE_OUTSIDE_BOXES: True
+
+        - NAME: shuffle_points
+          SHUFFLE_ENABLED: {
+            'train': True,
+            'test': True
+          }
+
+        - NAME: transform_points_to_voxels
+          VOXEL_SIZE: [0.15, 0.15, 0.2]
+          MAX_POINTS_PER_VOXEL: 10
+          MAX_NUMBER_OF_VOXELS: {
+            'train': 300000,
+            'test': 400000
+          }
+
+        # 0.6 m radar pillars: 512 x 512, one stride-2 stage gives the 256 x 256 grid of the lidar BEV (0.15 m x 8)
+        - NAME: transform_radar_points_to_voxels
+          VOXEL_SIZE: [0.6, 0.6, 8.0]
+          USED_FEATURES: ['x', 'y', 'z', 'rcs', 'vx_comp', 'vy_comp', 'v_r', 'time_lag']
+          MAX_POINTS_PER_VOXEL: 10
+          MAX_NUMBER_OF_VOXELS: {
+            'train': 40000,
+            'test': 40000
+          }
+
+
+MODEL:
+    NAME: RadarFusionCenterPoint
+
+    # ---------------- lidar branch (same as the lidar-only model, so its checkpoint loads) ----------------
+    VFE:
+        NAME: MeanVFE
+
+    BACKBONE_3D:
+        NAME: VoxelResBackBone8x
+
+    MAP_TO_BEV:
+        NAME: HeightCompression
+        NUM_BEV_FEATURES: 256
+
+    # ---------------- radar branch ----------------
+    RADAR_VFE:
+        NAME: RadarPillarVFE
+        WITH_DISTANCE: False
+        USE_ABSLOTE_XYZ: True
+        USE_NORM: True
+        NUM_FILTERS: [64]
+
+    RADAR_MAP_TO_BEV:
+        NAME: RadarPointPillarScatter
+        NUM_BEV_FEATURES: 64
+
+    RADAR_BACKBONE_2D:
+        NAME: RadarBEVBackbone
+        LAYER_NUMS: [3, 3]
+        LAYER_STRIDES: [1, 2]
+        NUM_FILTERS: [64, 128]
+        UPSAMPLE_STRIDES: [0.5, 1]
+        NUM_UPSAMPLE_FILTERS: [64, 64]
+
+    # concat(lidar BEV, radar BEV) -> convs, added to the lidar BEV; the last BN starts at zero, so the fused model
+    # starts out as the pretrained lidar model
+    FUSER:
+        NAME: RadarLidarBEVFuser
+        NUM_FILTERS: [256]  # hidden layers; a last conv maps back to the lidar channels
+
+    # ---------------- auxiliary heads (training only, on each branch's BEV before fusion) ----------------
+    AUX_HEADS:
+        LIDAR:
+            NAME: AuxCenterHead
+            INPUT_KEY: spatial_features
+            LOSS_PREFIX: aux_lidar
+            AUX_LOSS_WEIGHT: 0.5
+            CLASS_AGNOSTIC: False
+            CLASS_NAMES_EACH_HEAD: [
+                ['car'],
+                ['truck', 'other_vehicle'],
+                ['bus', 'trailer'],
+                ['barrier'],
+                ['motorcycle', 'bicycle'],
+                ['pedestrian', 'traffic_cone', 'animal'],
+                ['traffic_sign'],
+            ]
+            SHARED_CONV_CHANNEL: 64
+            USE_BIAS_BEFORE_NORM: True
+            NUM_HM_CONV: 2
+            SEPARATE_HEAD_CFG:
+                HEAD_ORDER: ['center', 'center_z', 'dim', 'rot']
+                HEAD_DICT: {
+                    'center': {'out_channels': 2, 'num_conv': 2},
+                    'center_z': {'out_channels': 1, 'num_conv': 2},
+                    'dim': {'out_channels': 3, 'num_conv': 2},
+                    'rot': {'out_channels': 2, 'num_conv': 2},
+                }
+            TARGET_ASSIGNER_CONFIG:
+                FEATURE_MAP_STRIDE: 8
+                NUM_MAX_OBJS: 500
+                GAUSSIAN_OVERLAP: 0.1
+                MIN_RADIUS: 2
+            LOSS_CONFIG:
+                LOSS_WEIGHTS: {
+                    'cls_weight': 1.0,
+                    'loc_weight': 0.25,
+                    'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2]
+                }
+
+        RADAR:
+            NAME: RadarAuxCenterHead
+            INPUT_KEY: radar_spatial_features_2d
+            LOSS_PREFIX: aux_radar
+            AUX_LOSS_WEIGHT: 0.5
+            CLASS_AGNOSTIC: False
+            CLASS_NAMES_EACH_HEAD: [
+                ['car'],
+                ['truck', 'other_vehicle'],
+                ['bus', 'trailer'],
+                ['barrier'],
+                ['motorcycle', 'bicycle'],
+                ['pedestrian', 'traffic_cone', 'animal'],
+                ['traffic_sign'],
+            ]
+            SHARED_CONV_CHANNEL: 64
+            USE_BIAS_BEFORE_NORM: True
+            NUM_HM_CONV: 2
+            SEPARATE_HEAD_CFG:
+                HEAD_ORDER: ['center', 'vel']
+                HEAD_DICT: {
+                    'center': {'out_channels': 2, 'num_conv': 2},
+                    'vel': {'out_channels': 2, 'num_conv': 2},
+                }
+            TARGET_ASSIGNER_CONFIG:
+                FEATURE_MAP_STRIDE: 8
+                NUM_MAX_OBJS: 500
+                GAUSSIAN_OVERLAP: 0.1
+                MIN_RADIUS: 2
+            LOSS_CONFIG:
+                LOSS_WEIGHTS: {
+                    'cls_weight': 1.0,
+                    'loc_weight': 0.25,
+                    'code_weights': [1.0, 1.0, 1.0, 1.0]
+                }
+            # radar points in a GT box: predicted box velocity along each point's ray == its measured v_r
+            DOPPLER_LOSS:
+                WEIGHT: 0.2
+                BOX_EXTRA_WIDTH: [1.0, 1.0, 2.0]
+                BETA: 1.0
+
+    # ---------------- shared detector on the fused BEV (same as the lidar-only model) ----------------
+    BACKBONE_2D:
+        NAME: BaseBEVBackbone
+
+        LAYER_NUMS: [5, 5]
+        LAYER_STRIDES: [1, 2]
+        NUM_FILTERS: [128, 256]
+        UPSAMPLE_STRIDES: [1, 2]
+        NUM_UPSAMPLE_FILTERS: [256, 256]
+
+    DENSE_HEAD:
+        NAME: CenterHead
+        CLASS_AGNOSTIC: False
+
+        CLASS_NAMES_EACH_HEAD: [
+            ['car'],
+            ['truck', 'other_vehicle'],
+            ['bus', 'trailer'],
+            ['barrier'],
+            ['motorcycle', 'bicycle'],
+            ['pedestrian', 'traffic_cone', 'animal'],
+            ['traffic_sign'],
+        ]
+
+        SHARED_CONV_CHANNEL: 64
+        USE_BIAS_BEFORE_NORM: True
+        NUM_HM_CONV: 2
+        SEPARATE_HEAD_CFG:
+            HEAD_ORDER: ['center', 'center_z', 'dim', 'rot', 'vel']
+            HEAD_DICT: {
+                'center': {'out_channels': 2, 'num_conv': 2},
+                'center_z': {'out_channels': 1, 'num_conv': 2},
+                'dim': {'out_channels': 3, 'num_conv': 2},
+                'rot': {'out_channels': 2, 'num_conv': 2},
+                'vel': {'out_channels': 2, 'num_conv': 2},
+            }
+
+        TARGET_ASSIGNER_CONFIG:
+            FEATURE_MAP_STRIDE: 8
+            NUM_MAX_OBJS: 500
+            GAUSSIAN_OVERLAP: 0.1
+            MIN_RADIUS: 2
+
+        LOSS_CONFIG:
+            LOSS_WEIGHTS: {
+                'cls_weight': 1.0,
+                'loc_weight': 0.25,
+                'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, 0.2, 1.0, 1.0]
+            }
+
+        POST_PROCESSING:
+            SCORE_THRESH: 0.1
+            POST_CENTER_LIMIT_RANGE: [-160.0, -160.0, -10.0, 160.0, 160.0, 10.0]
+            MAX_OBJ_PER_SAMPLE: 500
+            NMS_CONFIG:
+                NMS_TYPE: nms_gpu
+                NMS_THRESH: 0.2
+                NMS_PRE_MAXSIZE: 1000
+                NMS_POST_MAXSIZE: 83
+
+    POST_PROCESSING:
+        RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+
+        EVAL_METRIC: kitti
+
+
+OPTIMIZATION:
+    BATCH_SIZE_PER_GPU: 4
+    NUM_EPOCHS: 20
+    # per-epoch eval runs out of host RAM next to the training workers; evaluate checkpoints with test.py
+    EVAL_INTERVAL: 0
+
+    OPTIMIZER: adam_onecycle
+    LR: 0.001
+    WEIGHT_DECAY: 0.01
+    MOMENTUM: 0.9
+
+    MOMS: [0.95, 0.85]
+    PCT_START: 0.4
+    DIV_FACTOR: 10
+    DECAY_STEP_LIST: [35, 45]
+    LR_DECAY: 0.1
+    LR_CLIP: 0.0000001
+
+    LR_WARMUP: False
+    WARMUP_EPOCH: 1
+
+    GRAD_NORM_CLIP: 10

@@ -38,6 +38,9 @@ class DatasetTemplate(torch_data.Dataset):
 
         self.grid_size = self.data_processor.grid_size
         self.voxel_size = self.data_processor.voxel_size
+        self.radar_grid_size = self.data_processor.radar_grid_size
+        self.radar_voxel_size = self.data_processor.radar_voxel_size
+        self.radar_num_point_features = self.data_processor.radar_num_point_features
         self.total_epochs = 0
         self._merge_all_iters_to_one_epoch = False
 
@@ -229,12 +232,12 @@ class DatasetTemplate(torch_data.Dataset):
 
         for key, val in data_dict.items():
             try:
-                if key in ['voxels', 'voxel_num_points']:
+                if key in ['voxels', 'voxel_num_points', 'radar_voxels', 'radar_voxel_num_points']:
                     if isinstance(val[0], list):
                         batch_size_ratio = len(val[0])
                         val = [i for item in val for i in item]
                     ret[key] = np.concatenate(val, axis=0)
-                elif key in ['points', 'voxel_coords']:
+                elif key in ['points', 'voxel_coords', 'radar_points', 'radar_voxel_coords']:
                     coors = []
                     if isinstance(val[0], list):
                         val =  [i for item in val for i in item]

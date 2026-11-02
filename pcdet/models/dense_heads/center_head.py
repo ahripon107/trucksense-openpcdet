@@ -293,7 +293,7 @@ class CenterHead(nn.Module):
 
     def generate_predicted_boxes(self, batch_size, pred_dicts):
         post_process_cfg = self.model_cfg.POST_PROCESSING
-        post_center_limit_range = torch.tensor(post_process_cfg.POST_CENTER_LIMIT_RANGE).cuda().float()
+        post_center_limit_range = torch.tensor(post_process_cfg.POST_CENTER_LIMIT_RANGE).float().to(pred_dicts[0]['hm'].device)
 
         ret_dict = [{
             'pred_boxes': [],

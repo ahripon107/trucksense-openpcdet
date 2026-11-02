@@ -1,0 +1,25 @@
+# MAN TruckScenes v1.2-test (no annotations), for building the test infos. Run from tools/ (_BASE_CONFIG_ is
+# relative to it). Converted with: truckscenes_to_nuscenes.py --version v1.0-test (scenes renamed to the nuScenes
+# test names), then:
+#   python -m pcdet.datasets.nuscenes.nuscenes_dataset --func create_nuscenes_infos \
+#       --cfg_file cfgs/dataset_configs/man_nuscenes_test_dataset.yaml --version v1.0-test
+#   ... --func add_radar_infos ...              -> nuscenes_infos_10sweeps_test_withradar.pkl
+#   ... --func add_truckscenes_camera_infos ... -> nuscenes_infos_10sweeps_test_withradar_withcam.pkl
+# Inference: cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_test_man_dataset.yaml
+_BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_dataset.yaml
+
+VERSION: 'v1.0-test'
+
+TRUCKSCENES:
+    DATA_PATH: '/root/truckscenes-dataset/truckscenes_test/man-truckscenes'
+    VERSION: 'v1.2-test'
+
+DATA_SPLIT: {
+    'train': train,
+    'test': test
+}
+
+INFO_PATH: {
+    'train': [nuscenes_infos_10sweeps_train.pkl],
+    'test': [nuscenes_infos_10sweeps_test.pkl],
+}

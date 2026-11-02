@@ -656,7 +656,7 @@ class SwinTransformer(nn.Module):
                                                   f'specify `Pretrained` in ' \
                                                   f'`init_cfg` in ' \
                                                   f'{self.__class__.__name__} '
-            ckpt = torch.load(self.init_cfg.checkpoint, map_location='cpu')
+            ckpt = torch.load(self.init_cfg.checkpoint, map_location='cpu', weights_only=True)
             if 'state_dict' in ckpt:
                 _state_dict = ckpt['state_dict']
             elif 'model' in ckpt:
@@ -667,10 +667,12 @@ class SwinTransformer(nn.Module):
                 # supported loading weight from original repo,
                 _state_dict = swin_converter(_state_dict)
 
-            state_dict = OrderedDict()
-            for k, v in _state_dict.items():
-                if k.startswith('backbone.'):
-                    state_dict[k[9:]] = v
+            # mmdet detector checkpoints prefix the backbone keys with 'backbone.'; the original Swin repo's ImageNet
+            # checkpoints (converted above) have no prefix, and keeping only 'backbone.' keys loaded nothing from them
+            if any(k.startswith('backbone.') for k in _state_dict):
+                state_dict = OrderedDict((k[9:], v) for k, v in _state_dict.items() if k.startswith('backbone.'))
+            else:
+                state_dict = OrderedDict(_state_dict)
 
             # strip prefix of state_dict
             if list(state_dict.keys())[0].startswith('module.'):
@@ -710,7 +712,11 @@ class SwinTransformer(nn.Module):
                         nH2, L2).permute(1, 0).contiguous()
 
             # load state_dict
-            self.load_state_dict(state_dict, False)
+            missing, unexpected = self.load_state_dict(state_dict, False)
+            num_loaded = len(state_dict) - len(unexpected)
+            print(f'{self.__class__.__name__}: loaded {num_loaded} tensors from {self.init_cfg.checkpoint}, '
+                  f'missing {len(missing)}: {missing[:8]}, unexpected {len(unexpected)}: {unexpected[:8]}')
+            assert num_loaded > 0, f'no weights loaded from {self.init_cfg.checkpoint}'
 
     def forward(self, batch_dict):
         x = batch_dict['camera_imgs']

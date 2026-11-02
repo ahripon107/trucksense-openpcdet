@@ -16,6 +16,8 @@ from .voxelnext import VoxelNeXt
 from .transfusion import TransFusion
 from .bevfusion import BevFusion
 from .bevdet import BEVDet
+from .radar_fusion_centerpoint import RadarFusionCenterPoint
+from .radar_camera_fusion_centerpoint import RadarCameraFusionCenterPoint
 
 __all__ = {
     'Detector3DTemplate': Detector3DTemplate,
@@ -37,6 +39,8 @@ __all__ = {
     'TransFusion': TransFusion,
     'BevFusion': BevFusion,
     'BEVDet': BEVDet,
+    'RadarFusionCenterPoint': RadarFusionCenterPoint,
+    'RadarCameraFusionCenterPoint': RadarCameraFusionCenterPoint,
 }
 
 

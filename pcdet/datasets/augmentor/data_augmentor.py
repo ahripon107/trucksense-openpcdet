@@ -3,7 +3,7 @@ from functools import partial
 import numpy as np
 from PIL import Image
 
-from ...utils import common_utils
+from ...utils import common_utils, radar_utils
 from . import augmentor_utils, database_sampler
 
 
@@ -63,6 +63,8 @@ class DataAugmentor(object):
                 gt_boxes, points, return_flip=True
             )
             data_dict['flip_%s'%cur_axis] = enable
+            if enable and 'radar_points' in data_dict:
+                data_dict['radar_points'] = getattr(radar_utils, 'flip_along_%s' % cur_axis)(data_dict['radar_points'])
             if 'roi_boxes' in data_dict.keys():
                 num_frame, num_rois,dim = data_dict['roi_boxes'].shape
                 roi_boxes, _, _ = getattr(augmentor_utils, 'random_flip_along_%s' % cur_axis)(
@@ -89,6 +91,9 @@ class DataAugmentor(object):
             data_dict['roi_boxes'].reshape(-1, dim), np.zeros([1, 3]), rot_range=rot_range, return_rot=True, noise_rotation=noise_rot)
             data_dict['roi_boxes'] = roi_boxes.reshape(num_frame, num_rois,dim)
 
+        if 'radar_points' in data_dict:
+            data_dict['radar_points'] = radar_utils.rotate_along_z(data_dict['radar_points'], noise_rot)
+
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
         data_dict['noise_rot'] = noise_rot
@@ -107,6 +112,9 @@ class DataAugmentor(object):
             gt_boxes, points, noise_scale = augmentor_utils.global_scaling(
                 data_dict['gt_boxes'], data_dict['points'], config['WORLD_SCALE_RANGE'], return_scale=True
             )
+
+        if 'radar_points' in data_dict:
+            data_dict['radar_points'] = radar_utils.scale(data_dict['radar_points'], noise_scale)
 
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points
@@ -149,6 +157,8 @@ class DataAugmentor(object):
                 
         if 'roi_boxes' in data_dict.keys():
             data_dict['roi_boxes'][:, :3] += noise_translate
+        if 'radar_points' in data_dict:
+            data_dict['radar_points'] = radar_utils.translate(data_dict['radar_points'], noise_translate)
         
         data_dict['gt_boxes'] = gt_boxes
         data_dict['points'] = points

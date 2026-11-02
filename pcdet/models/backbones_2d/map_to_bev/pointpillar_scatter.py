@@ -71,3 +71,16 @@ class PointPillarScatter3d(nn.Module):
         batch_spatial_features = batch_spatial_features.view(batch_size, self.num_bev_features_before_compression * self.nz, self.ny, self.nx)
         batch_dict['spatial_features'] = batch_spatial_features
         return batch_dict
+
+class RadarPointPillarScatter(PointPillarScatter):
+    """Scatter of the radar pillars to 'radar_spatial_features' (batch size from batch_dict: a sample can have no radar)."""
+    def forward(self, batch_dict, **kwargs):
+        pillar_features, coords = batch_dict['radar_pillar_features'], batch_dict['radar_voxel_coords']
+        batch_size = batch_dict['batch_size']
+        spatial_features = pillar_features.new_zeros(batch_size, self.num_bev_features, self.nz * self.ny * self.nx)
+        coords = coords.long()
+        indices = coords[:, 1] + coords[:, 2] * self.nx + coords[:, 3]
+        spatial_features[coords[:, 0], :, indices] = pillar_features
+        batch_dict['radar_spatial_features'] = spatial_features.view(
+            batch_size, self.num_bev_features * self.nz, self.ny, self.nx)
+        return batch_dict

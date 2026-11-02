@@ -121,3 +121,19 @@ class PillarVFE(VFETemplate):
         features = features.squeeze()
         batch_dict['pillar_features'] = features
         return batch_dict
+
+
+class RadarPillarVFE(PillarVFE):
+    """
+    PillarVFE on the radar pillars ('radar_voxels', 'radar_voxel_num_points', 'radar_voxel_coords'), built with the
+    radar point features and pillar size; writes 'radar_pillar_features'.
+    """
+    def forward(self, batch_dict, **kwargs):
+        radar_dict = super().forward({
+            'voxels': batch_dict['radar_voxels'],
+            'voxel_num_points': batch_dict['radar_voxel_num_points'],
+            'voxel_coords': batch_dict['radar_voxel_coords'],
+        })
+        # PillarVFE squeezes (N, 1, C): keep (N, C) when there is a single pillar
+        batch_dict['radar_pillar_features'] = radar_dict['pillar_features'].view(-1, self.num_filters[-1])
+        return batch_dict

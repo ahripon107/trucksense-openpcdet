@@ -4,7 +4,7 @@ import numpy as np
 from skimage import transform
 import torch
 import torchvision
-from ...utils import box_utils, common_utils
+from ...utils import box_utils, common_utils, radar_utils
 
 tv = None
 try:
@@ -68,9 +68,11 @@ class DataProcessor(object):
         self.num_point_features = num_point_features
         self.mode = 'train' if training else 'test'
         self.grid_size = self.voxel_size = None
+        self.radar_grid_size = self.radar_voxel_size = self.radar_num_point_features = None
         self.data_processor_queue = []
 
         self.voxel_generator = None
+        self.radar_voxel_generator = None
 
         for cur_cfg in processor_configs:
             cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)
@@ -83,6 +85,10 @@ class DataProcessor(object):
         if data_dict.get('points', None) is not None:
             mask = common_utils.mask_points_by_range(data_dict['points'], self.point_cloud_range)
             data_dict['points'] = data_dict['points'][mask]
+
+        if data_dict.get('radar_points', None) is not None:
+            mask = common_utils.mask_points_by_range(data_dict['radar_points'], self.point_cloud_range)
+            data_dict['radar_points'] = data_dict['radar_points'][mask]
 
         if data_dict.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
             mask = box_utils.mask_boxes_outside_range_numpy(
@@ -179,6 +185,36 @@ class DataProcessor(object):
             data_dict['voxel_num_points'] = num_points
         return data_dict
 
+    def transform_radar_points_to_voxels(self, data_dict=None, config=None):
+        """
+        Pillars of the radar points ('radar_voxels', 'radar_voxel_coords', 'radar_voxel_num_points'), built from the
+        USED_FEATURES columns of 'radar_points'. 'radar_points' itself keeps all columns for the radar losses.
+        """
+        if data_dict is None:
+            grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
+            self.radar_grid_size = np.round(grid_size).astype(np.int64)
+            self.radar_voxel_size = config.VOXEL_SIZE
+            self.radar_num_point_features = len(config.USED_FEATURES)
+            assert config.USED_FEATURES[:3] == ['x', 'y', 'z']
+            return partial(self.transform_radar_points_to_voxels, config=config)
+
+        if self.radar_voxel_generator is None:
+            self.radar_voxel_generator = VoxelGeneratorWrapper(
+                vsize_xyz=config.VOXEL_SIZE,
+                coors_range_xyz=self.point_cloud_range,
+                num_point_features=self.radar_num_point_features,
+                max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
+            )
+
+        used = [radar_utils.RADAR_COL[name] for name in config.USED_FEATURES]
+        radar_points = np.ascontiguousarray(data_dict['radar_points'][:, used])
+        voxels, coordinates, num_points = self.radar_voxel_generator.generate(radar_points)
+        data_dict['radar_voxels'] = voxels
+        data_dict['radar_voxel_coords'] = coordinates
+        data_dict['radar_voxel_num_points'] = num_points
+        return data_dict
+
     def sample_points(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.sample_points, config=config)
@@ -254,8 +290,8 @@ class DataProcessor(object):
 
             rotation = torch.eye(2)
             translation = torch.zeros(2)
-            # post-homography transformation
-            rotation *= resize
+            # post-homography transformation; resize: one factor, or (x, y) factors
+            rotation *= torch.tensor(np.broadcast_to(resize, 2), dtype=torch.float32)[:, None]
             translation -= torch.Tensor(crop[:2])
             if flip:
                 A = torch.Tensor([[-1, 0], [0, 1]])
@@ -278,6 +314,47 @@ class DataProcessor(object):
             transform[:2, 3] = translation
             transforms.append(transform.numpy())
         data_dict["img_aug_matrix"] = transforms
+        return data_dict
+
+    def camera_depth_targets(self, data_dict=None, config=None):
+        """
+        Depth supervision for the camera branch (BEVDepth-style): lidar points projected into every augmented image
+        (run it after image_calibrate and before image_normalize),
+        as 'camera_depth_targets' (num_cams, H / DOWNSAMPLE, W / DOWNSAMPLE), the nearest depth [m] in each feature
+        cell, 0 where no point lands. Points are mapped back through lidar_aug_matrix first, so the depths are in the
+        un-augmented camera frame the view transform's frustum uses; positions go through img_aug_matrix.
+        Only points with timestamp <= MAX_TIME_LAG (last point feature) are used: past sweeps smear moving objects.
+        """
+        if data_dict is None:
+            return partial(self.camera_depth_targets, config=config)
+
+        final_w, final_h = data_dict['camera_imgs'][0].size  # PIL images after resize / crop / imgaug
+        stride = config.DOWNSAMPLE
+        assert final_h % stride == 0 and final_w % stride == 0
+        points = data_dict['points']
+        points = points[points[:, -1] <= config.get('MAX_TIME_LAG', 0.0) + 1e-4, 0:3].astype(np.float64)
+        lidar_aug = data_dict['lidar_aug_matrix']
+        orig = (points - lidar_aug[:3, 3]) @ np.linalg.inv(lidar_aug[:3, :3]).T
+
+        num_cams = len(data_dict['lidar2image'])
+        targets = np.zeros((num_cams, final_h // stride, final_w // stride), dtype=np.float32)
+        for c in range(num_cams):
+            lidar2image = np.asarray(data_dict['lidar2image'][c], dtype=np.float64)
+            img_aug = np.asarray(data_dict['img_aug_matrix'][c], dtype=np.float64)
+            q = orig @ lidar2image[:3, :3].T + lidar2image[:3, 3]
+            depth = q[:, 2]
+            front = depth > config.get('MIN_DEPTH', 0.5)
+            uv = q[front, :2] / depth[front, None]
+            uv = uv @ img_aug[:2, :2].T + img_aug[:2, 3]
+            depth = depth[front]
+            on_img = (uv[:, 0] >= 0) & (uv[:, 0] < final_w) & (uv[:, 1] >= 0) & (uv[:, 1] < final_h)
+            uv, depth = uv[on_img], depth[on_img]
+            # each cell keeps its nearest point
+            cells = (uv // stride).astype(np.int64)
+            nearest = np.full(targets[c].size, np.inf)
+            np.minimum.at(nearest, cells[:, 1] * targets.shape[2] + cells[:, 0], depth)
+            targets[c] = np.where(np.isfinite(nearest), nearest, 0).reshape(targets[c].shape)
+        data_dict['camera_depth_targets'] = targets
         return data_dict
 
     def forward(self, data_dict):

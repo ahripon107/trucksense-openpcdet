@@ -169,6 +169,9 @@ cls_attr_dist.update({
     'other_vehicle': cls_attr_dist['construction_vehicle'],
     'traffic_sign': {'traffic_sign.pole_mounted': 1},
     'animal': {'': 1},
+    # classes without attributes: the upstream all-zero tables above made max() pick 'cycle.with_rider'
+    'barrier': {'': 1},
+    'traffic_cone': {'': 1},
 })
 
 
