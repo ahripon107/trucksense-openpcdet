@@ -12,6 +12,14 @@ DATA_CONFIG:
 
     VERSION: 'v1.0-test'
 
+    # method info written to results_nusc.json['meta'] (the use_* flags are set from the config)
+    SUBMISSION_META:
+        method_name: 'TriSense-CenterPoint'
+        authors: ''
+        affiliation: ''
+        description: 'TriSense-CenterPoint: lidar-radar-camera fusion. Voxel CenterPoint (OpenPCDet) with a radar point branch and a 4-camera image branch fused in BEV. Inputs: keyframe + 4 past lidar sweeps, keyframe + 6 past radar sweeps, keyframe camera images. No TTA, no future frames, no map, no external data.'
+        code_url: ''
+        paper_url: ''
 
     TRUCKSCENES:
         DATA_PATH: '/root/truckscenes-dataset/truckscenes_test/man-truckscenes'

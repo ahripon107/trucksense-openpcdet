@@ -288,13 +288,24 @@ class NuScenesDataset(DatasetTemplate):
             # head config is per head, so keep the 500 highest-scoring boxes over all heads
             for token, boxes in nusc_annos['results'].items():
                 nusc_annos['results'][token] = sorted(boxes, key=lambda b: -b['detection_score'])[:500]
+        # all 13 meta fields of the nuScenes / TruckScenes results format (the TruckScenes server rejects a
+        # submission without them); method info comes from DATA_CONFIG.SUBMISSION_META
         nusc_annos['meta'] = {
             'use_camera': self.use_camera,
             'use_lidar': True,
             'use_radar': self.dataset_cfg.get('RADAR', None) is not None,
             'use_map': False,
             'use_external': False,
+            'use_future_frames': False,
+            'use_tta': False,
+            'method_name': 'CenterPoint',
+            'authors': '',
+            'affiliation': '',
+            'description': '',
+            'code_url': '',
+            'paper_url': '',
         }
+        nusc_annos['meta'].update(dict(self.dataset_cfg.get('SUBMISSION_META', {})))
 
         output_path = Path(kwargs['output_path'])
         output_path.mkdir(exist_ok=True, parents=True)
