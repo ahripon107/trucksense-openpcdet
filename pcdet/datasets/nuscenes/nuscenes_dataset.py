@@ -1,4 +1,5 @@
 import copy
+import sys
 import pickle
 from pathlib import Path
 
@@ -619,9 +620,17 @@ if __name__ == '__main__':
                         help='lidar GT database the radar GT database is paired with')
     parser.add_argument('--radar_sweeps', type=int, default=12, help='radar keyframe + past sweeps kept in the infos')
     args = parser.parse_args()
+    # v1.0-test (no annotations): infos only, no GT database; radar / camera infos for the test split
+    info_splits = ['test'] if args.version == 'v1.0-test' else ['train', 'val']
+
+    def load_dataset_cfg(cfg_file):
+        # a dataset config or a model config (its DATA_CONFIG); resolves _BASE_CONFIG_ like train.py / test.py
+        from ...config import cfg_from_yaml_file
+        cfg = cfg_from_yaml_file(cfg_file, EasyDict())
+        return cfg.DATA_CONFIG if 'DATA_CONFIG' in cfg else cfg
 
     if args.func == 'create_nuscenes_infos':
-        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        dataset_cfg = load_dataset_cfg(args.cfg_file)
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         dataset_cfg.VERSION = args.version
         # DATA_PATH may be absolute or relative to tools/, matching how train.py resolves it
@@ -634,6 +643,8 @@ if __name__ == '__main__':
             with_cam=args.with_cam,
             truckscenes='TRUCKSCENES' in dataset_cfg
         )
+        if args.version == 'v1.0-test':
+            sys.exit(0)
 
         nuscenes_dataset = NuScenesDataset(
             dataset_cfg=dataset_cfg, class_names=None,
@@ -648,25 +659,25 @@ if __name__ == '__main__':
         add_camera_infos(version=args.version, data_path=data_root, max_sweeps=dataset_cfg.MAX_SWEEPS)
     elif args.func == 'add_radar_infos':
         from .truckscenes_radar import add_radar_infos
-        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        dataset_cfg = load_dataset_cfg(args.cfg_file)
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve() / args.version
         add_radar_infos(
             data_path=data_root, truckscenes_path=dataset_cfg.TRUCKSCENES.DATA_PATH,
             truckscenes_version=dataset_cfg.TRUCKSCENES.VERSION,
-            info_names=[f'nuscenes_infos_{dataset_cfg.MAX_SWEEPS}sweeps_{split}.pkl' for split in ['train', 'val']],
+            info_names=[f'nuscenes_infos_{dataset_cfg.MAX_SWEEPS}sweeps_{split}.pkl' for split in info_splits],
             max_sweeps=args.radar_sweeps
         )
     elif args.func == 'add_truckscenes_camera_infos':
         # 4 TruckScenes cameras from the original tables, on top of the radar infos
         from .truckscenes_camera import add_camera_infos as add_truckscenes_camera_infos
-        dataset_cfg = EasyDict(yaml.safe_load(open(args.cfg_file)))
+        dataset_cfg = load_dataset_cfg(args.cfg_file)
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         data_root = (ROOT_DIR / 'tools' / dataset_cfg.DATA_PATH).resolve() / args.version
         add_truckscenes_camera_infos(
             data_path=data_root, truckscenes_path=dataset_cfg.TRUCKSCENES.DATA_PATH,
             truckscenes_version=dataset_cfg.TRUCKSCENES.VERSION,
-            info_names=[f'nuscenes_infos_10sweeps_{split}_withradar.pkl' for split in ['train', 'val']]
+            info_names=[f'nuscenes_infos_10sweeps_{split}_withradar.pkl' for split in info_splits]
         )
     elif args.func == 'create_radar_gt_database':
         # --cfg_file: the radar model config (DATA_CONFIG with RADAR and the *_withradar INFO_PATH); run from tools/

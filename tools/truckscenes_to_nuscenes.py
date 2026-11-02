@@ -30,6 +30,7 @@ Usage (openmmlab env, needs python-lzf):
       --meta  man-truckscenes_metadata_v1.2-mini/man-truckscenes/v1.2-mini \
       --data  man-truckscenes_sensordata_v1.2-mini/man-truckscenes \
       --out   openpcdet --version v1.0-mini
+  --version v1.0-test maps the TruckScenes test scenes (no annotations) to the nuScenes test scene names.
   --data takes several roots (e.g. sensordata01/man-truckscenes sensordata02/man-truckscenes ...);
   each sample_data filename is resolved to the root that contains it.
   --crop drops merged points outside POINT_CLOUD_RANGE (x/y +-51.2 m, z [-5, 3] in the virtual lidar frame).
@@ -75,6 +76,7 @@ TRUCKSCENES_SPLITS = {
 NUSC_SPLITS = {
     'v1.0-mini': {'train': nusc_splits.mini_train, 'val': nusc_splits.mini_val},
     'v1.0-trainval': {'train': nusc_splits.train, 'val': nusc_splits.val},
+    'v1.0-test': {'test': nusc_splits.test},
 }
 
 
@@ -82,6 +84,8 @@ def get_truckscenes_splits(version):
     if version in TRUCKSCENES_SPLITS:
         return TRUCKSCENES_SPLITS[version]
     from truckscenes.utils import splits as ts_splits  # pip install truckscenes-devkit
+    if version == 'v1.0-test':
+        return {'test': ts_splits.test}
     return {'train': ts_splits.train, 'val': ts_splits.val}
 
 
@@ -163,7 +167,7 @@ def main():
     parser.add_argument('--data', required=True, nargs='+',
                         help='TruckScenes sensor data root(s) (each contains samples/, sweeps/)')
     parser.add_argument('--out', required=True, help='output DATA_PATH; data goes to <out>/<version>')
-    parser.add_argument('--version', default='v1.0-mini', choices=['v1.0-mini', 'v1.0-trainval'])
+    parser.add_argument('--version', default='v1.0-mini', choices=['v1.0-mini', 'v1.0-trainval', 'v1.0-test'])
     parser.add_argument('--workers', type=int, default=6)
     parser.add_argument('--crop', action='store_true', help='drop merged points outside POINT_CLOUD_RANGE')
     args = parser.parse_args()
@@ -194,14 +198,15 @@ def main():
 
     # ---------------- scenes / logs / map ----------------
     ts_split, nu_split = get_truckscenes_splits(args.version), NUSC_SPLITS[args.version]
-    assert len(ts_split['train']) <= len(nu_split['train']) and len(ts_split['val']) <= len(nu_split['val'])
-    rename = dict(zip(ts_split['train'], nu_split['train']))
-    rename.update(zip(ts_split['val'], nu_split['val']))
+    rename = {}
+    for split, ts_names in ts_split.items():
+        assert len(ts_names) <= len(nu_split[split]), (split, len(ts_names), len(nu_split[split]))
+        rename.update(zip(ts_names, nu_split[split]))
 
     out_scenes, out_logs = [], []
     for scene in scenes:
         if scene['name'] not in rename:
-            print(f'skip scene not in {args.version} train/val split: {scene["name"]}')
+            print(f'skip scene not in {args.version} {"/".join(ts_split)} split: {scene["name"]}')
             continue
         log_token = new_token()
         first_ts = sample_by_token[scene['first_sample_token']]['timestamp']

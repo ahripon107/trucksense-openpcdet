@@ -1,0 +1,34 @@
+# Inference of the Phase 2 model (stage B, cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml) on the
+# TruckScenes v1.2-test split. There is no GT: test.py only writes results_nusc.json (sample tokens are the original
+# TruckScenes ones, max 500 boxes per sample). Infos: see cfgs/dataset_configs/man_nuscenes_test_dataset.yaml.
+#python test.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_test_man_dataset.yaml \
+#      --batch_size 4 --workers 4 --extra_tag v1 \
+#      --ckpt ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset/v1/ckpt/checkpoint_epoch_5.pth
+_BASE_CONFIG_: cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml
+
+# the base file's DATA_CONFIG._BASE_CONFIG_ is not resolved through a top-level _BASE_CONFIG_; resolve it here
+DATA_CONFIG:
+    _BASE_CONFIG_: cfgs/dataset_configs/man_nuscenes_radar_camera_dataset.yaml
+
+    VERSION: 'v1.0-test'
+
+
+    TRUCKSCENES:
+        DATA_PATH: '/root/truckscenes-dataset/truckscenes_test/man-truckscenes'
+        VERSION: 'v1.2-test'
+
+    DATA_SPLIT: {
+        'train': train,
+        'test': test
+    }
+
+    INFO_PATH: {
+        'train': [nuscenes_infos_10sweeps_train_withradar_withcam.pkl],
+        'test': [nuscenes_infos_10sweeps_test_withradar_withcam.pkl],
+    }
+
+    RADAR:
+        DATA_PATH: '/root/truckscenes-dataset/truckscenes_test/man-truckscenes'
+
+    CAMERA_CONFIG:
+        DATA_PATH: '/root/truckscenes-dataset/truckscenes_test/man-truckscenes'
