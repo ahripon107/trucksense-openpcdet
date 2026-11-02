@@ -1,8 +1,12 @@
 # TruckScenes 3D Object Detection
 
-Lidar-only 3D object detection on [MAN TruckScenes](https://www.man.eu/truckscenes/) for the
-TruckScenes detection challenge. Two CenterPoint models are trained on TruckScenes after it is
-converted to the nuScenes format, and both are scored with the official truckscenes-devkit evaluation.
+3D object detection on [MAN TruckScenes](https://www.man.eu/truckscenes/) for the TruckScenes
+detection challenge. TruckScenes is converted to the nuScenes format and CenterPoint models are trained on it:
+lidar-only baselines, and **TriSense-CenterPoint**, which fuses lidar, the 6 radars and 4 cameras. All models are
+scored with the official truckscenes-devkit evaluation.
+
+TriSense-CenterPoint scores **NDS 0.5542 / mAP 0.5050 on the TruckScenes test set** (see
+[Challenge submission](#challenge-submission)).
 
 The code is built on [OpenPCDet](https://github.com/open-mmlab/OpenPCDet).
 
@@ -63,6 +67,28 @@ TRUCKSCENES:
     VERSION: 'v1.2-trainval'
     EVAL_CONFIG: 'detection_cvpr_2024'
 ```
+
+### 3. Test split (for challenge submissions)
+
+The test split has no annotations, so only the infos are built (no GT database). Convert it with
+`--version v1.0-test`, which maps the test scenes to the nuScenes test scene names; sample tokens stay the
+original TruckScenes ones. The info commands run from `tools/`, because the test config's `_BASE_CONFIG_` is
+relative to it:
+
+```shell
+python tools/truckscenes_to_nuscenes.py \
+    --meta <truckscenes-test>/man-truckscenes/v1.2-test --data <truckscenes-test>/man-truckscenes \
+    --out  /root/truckscenes-dataset/man_nuscenes/openpcdet --version v1.0-test
+cd tools
+for f in create_nuscenes_infos add_radar_infos add_truckscenes_camera_infos; do
+    python -m pcdet.datasets.nuscenes.nuscenes_dataset --func $f \
+        --cfg_file cfgs/dataset_configs/man_nuscenes_test_dataset.yaml --version v1.0-test
+done
+```
+
+This writes `nuscenes_infos_10sweeps_test{,_withradar,_withradar_withcam}.pkl` (149 scenes, 5960 samples) to
+`<DATA_PATH>/v1.0-test/`. The paths of the original test data are set in
+`tools/cfgs/dataset_configs/man_nuscenes_test_dataset.yaml`.
 
 ### Classes
 
@@ -144,6 +170,31 @@ The test projects 3D points through the full augmented pipeline and checks that 
 (< 1 px, no bias) and that the view transform's geometry maps them back. It also writes
 `output/camera_aug_overlay.jpg`, which shows the GT boxes on the augmented images.
 
+## Lidar–radar–camera fusion (TriSense-CenterPoint)
+
+`tools/cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml`
+(`RadarCameraFusionCenterPoint`) is the radar–lidar model above plus a camera branch: Swin-T + FPN → a camera-only
+LSS view transform onto the shared 256 × 256 / 1.2 m BEV grid → a camera fuser added to the lidar + radar BEV.
+
+Training has two stages, both from `tools/`:
+
+1. **Stage A (warm-up)**, `..._radar_camera_warmup_man_dataset.yaml`, starting from the lidar-only checkpoint. The
+   lidar model is frozen; the camera and radar branches train on their own aux losses (camera heatmap + depth, radar
+   aux + Doppler). The fusers stay at zero init, so the model still predicts exactly like the lidar model.
+2. **Stage B (joint)**, `..._radar_camera_man_dataset.yaml`, starting from the stage A checkpoint.
+
+```shell
+python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_warmup_man_dataset.yaml \
+    --extra_tag v1 --workers 16 --batch_size 4 --use_amp \
+    --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_man_dataset/v3_150m/ckpt/checkpoint_epoch_4.pth
+python train.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset.yaml \
+    --extra_tag v1 --workers 16 --batch_size 4 --use_amp \
+    --pretrained_model ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_warmup_man_dataset/v1/ckpt/checkpoint_epoch_1.pth
+```
+
+Inputs at inference: keyframe + 4 past lidar sweeps, keyframe + 6 past radar sweeps, keyframe images of the 4
+cameras. No test-time augmentation, future frames, map or external data.
+
 ## Training
 
 Run from `tools/`:
@@ -186,10 +237,15 @@ python test.py --cfg_file cfgs/nuscenes_models/cbgs_pillar0075_res2d_centerpoint
 
 | Model | Epoch | mAP | NDS |
 |---|---|---|---|
-| Voxel CenterPoint | 3 / 20 | 0.357 | 0.437 |
-| Pillar CenterPoint | 5 / 20 | 0.322 | 0.425 |
+| Voxel CenterPoint (lidar) | 3 / 20 | 0.357 | 0.437 |
+| Pillar CenterPoint (lidar) | 5 / 20 | 0.322 | 0.425 |
+| Voxel CenterPoint (lidar, `v3_150m`, start of the fusion model) | 4 | 0.334 | 0.433 |
+| TriSense-CenterPoint, stage B | 3 | 0.482 | 0.504 |
+| TriSense-CenterPoint, stage B | 5 | 0.497 | 0.545 |
+| TriSense-CenterPoint, stage B (submitted) | 6 | 0.492 | 0.548 |
 
-Velocity error is still high: mAVE is 1.3–1.7, against about 0.25 for CenterPoint on nuScenes.
+Velocity error is still the largest TP error: mAVE is about 0.82 for the fusion model (1.3–1.7 for lidar-only),
+against about 0.25 for CenterPoint on nuScenes.
 
 ## Challenge submission
 
@@ -197,20 +253,67 @@ You run inference yourself and upload one JSON file of detections to the
 [evaluation server](https://huggingface.co/spaces/TruckScenes/MANTruckScenesDetectionChallenge).
 You don't submit model weights.
 
-The rules (truckscenes-devkit `eval/detection/README.md`):
+### Running inference on the test split
 
-- At inference, use at most 6 past lidar sweeps (about 0.5 s). Training has no limit.
+Build the test infos first ([Test split](#3-test-split-for-challenge-submissions)), then from `tools/`:
+
+```shell
+python test.py --cfg_file cfgs/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_test_man_dataset.yaml \
+    --batch_size 4 --workers 16 --extra_tag v1 \
+    --ckpt ../output/nuscenes_models/cbgs_voxel0075_res3d_centerpoint_radar_camera_man_dataset/v1/ckpt/checkpoint_epoch_6.pth
+```
+
+There is no ground truth, so `test.py` only writes `results_nusc.json` (about 37 min on an A100; about 195 MB,
+54 MB zipped). It keeps the 500 highest-scoring boxes per sample and writes the full `meta` block. The `use_*`
+flags come from the config; the method info comes from `DATA_CONFIG.SUBMISSION_META` in the test config:
+
+```yaml
+SUBMISSION_META:
+    method_name: 'TriSense-CenterPoint'
+    authors: ''
+    affiliation: ''
+    description: '...'
+    code_url: ''
+    paper_url: ''
+```
+
+Check the file with the devkit's own loader before uploading:
+
+```shell
+python -c "from truckscenes.eval.common.loaders import load_prediction; \
+from truckscenes.eval.detection.data_classes import DetectionBox; \
+r, m = load_prediction('results_nusc.json', 500, DetectionBox, verbose=True); print(len(m), m['method_name'])"
+```
+
+### Rules
+
+From truckscenes-devkit `eval/detection/README.md` (the evaluation server installs `truckscenes-devkit`):
+
+- At inference, use at most about 0.5 s of past data: 6 past lidar sweeps, 11 past radar sweeps, 6 past camera
+  images. Training has no limit.
 - Submit at most 500 boxes per sample.
 - The JSON file must have fewer than 1 million lines.
 - Include every test sample token, even with an empty list.
-- `meta` must declare `use_camera`, `use_lidar`, `use_radar`, `use_map`, `use_external`, `use_future_frames`, `use_tta`, `method_name` and `authors`.
+- `meta` must have all 13 fields: `use_camera`, `use_lidar`, `use_radar`, `use_map`, `use_external`,
+  `use_future_frames`, `use_tta` (bools) and `method_name`, `authors`, `affiliation`, `description`, `code_url`,
+  `paper_url` (strings; empty if not available). A submission with fewer fields is rejected.
+- `attribute_name` must be valid for the class, and empty for barrier and traffic_cone.
 - Submit at most 5 times per day. Each submission must come from a different model, not just a different epoch.
 - Only one result can be selected for the public leaderboard.
 
-Still missing for a test submission:
+### Test results
 
-- converting the TruckScenes test split;
-- the extra `meta` fields (`use_future_frames`, `use_tta`, `method_name`, `authors`).
+TriSense-CenterPoint, stage B epoch 6, submitted 2026-11-02:
+
+| mAP | NDS | mATE | mASE | mAOE | mAVE | mAAE |
+|---|---|---|---|---|---|---|
+| 0.5050 | 0.5542 | 0.373 | 0.359 | 0.276 | 0.868 | 0.108 |
+
+| car | truck | bus | trailer | other_vehicle | pedestrian | motorcycle | bicycle | traffic_cone | barrier | animal | traffic_sign |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.842 | 0.588 | 0.401 | 0.652 | 0.254 | 0.584 | 0.598 | 0.136 | 0.720 | 0.565 | 0.000 | 0.719 |
+
+Weakest conditions: night (NDS 0.00), tunnels (0.22), fog (0.28), glare (0.29), against 0.56 on regular roads.
 
 ## License
 
